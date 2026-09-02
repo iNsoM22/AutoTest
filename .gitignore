@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments & uv
+.venv/
+venv/
+.uv-cache/
+
+# Environment variables & local secrets
+.env
+.env.local
+.env.*.local
+
+# Testing & type checking
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# SQLite databases & runtime artifacts
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+artifacts/
+logs/
+test-results/
+playwright-report/
+
+# IDEs & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
