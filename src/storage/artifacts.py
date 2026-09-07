@@ -1,8 +1,31 @@
-"""Filesystem artifact directory management with safe relative path handling."""
+"""Filesystem artifact directory management and SQLite artifact metadata persistence."""
 
 from __future__ import annotations
 
+import json
+import sqlite3
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from src.storage.database import Database
+
+
+class ArtifactRecord(BaseModel):
+    """Metadata row stored in SQLite `artifacts` pointing to a local file."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    project_id: str
+    session_id: str | None = None
+    artifact_type: str
+    relative_path: str
+    mime_type: str = ""
+    size_bytes: int = Field(default=0, ge=0)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ArtifactManager:
@@ -41,6 +64,23 @@ class ArtifactManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def save_session_bytes(
+        self,
+        project_id: str,
+        session_id: str,
+        filename: str,
+        content: bytes,
+    ) -> tuple[Path, str]:
+        """Write bytes into a session artifact directory and return `(path, relative_path)`."""
+        if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+            raise ValueError(f"Invalid artifact filename: {filename!r}")
+        directory = self.ensure_session_dir(project_id, session_id)
+        target = (directory / filename).resolve()
+        if not target.is_relative_to(self._base_dir):
+            raise ValueError("Computed artifact file path escapes base directory.")
+        target.write_bytes(content)
+        return target, self.to_relative_path(target)
+
     def resolve_path(self, relative_path: str) -> Path:
         """Resolve a stored relative artifact path and guard against path traversal."""
         candidate = (self._base_dir / relative_path).resolve()
@@ -63,3 +103,65 @@ class ArtifactManager:
         if not candidate.is_relative_to(self._base_dir):
             raise ValueError("Computed artifact path escapes base directory.")
         return candidate
+
+
+class ArtifactRepository:
+    """SQLite persistence for artifact metadata rows."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def create(self, record: ArtifactRecord) -> ArtifactRecord:
+        """Insert a new artifact metadata row."""
+        with self._db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO artifacts (
+                    id, project_id, session_id, artifact_type, relative_path,
+                    mime_type, size_bytes, created_at, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    record.id,
+                    record.project_id,
+                    record.session_id,
+                    record.artifact_type,
+                    record.relative_path,
+                    record.mime_type,
+                    record.size_bytes,
+                    record.created_at.isoformat(),
+                    json.dumps(record.metadata, ensure_ascii=False),
+                ),
+            )
+        return record
+
+    def list_by_session(self, session_id: str) -> list[ArtifactRecord]:
+        """Return all artifact records associated with a recording session."""
+        rows = (
+            self._db.connect()
+            .execute(
+                """
+                SELECT * FROM artifacts
+                WHERE session_id = ?
+                ORDER BY created_at ASC;
+                """,
+                (session_id,),
+            )
+            .fetchall()
+        )
+        return [self._row_to_record(row) for row in rows]
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:
+        return ArtifactRecord(
+            id=row["id"],
+            project_id=row["project_id"],
+            session_id=row["session_id"],
+            artifact_type=row["artifact_type"],
+            relative_path=row["relative_path"],
+            mime_type=row["mime_type"],
+            size_bytes=int(row["size_bytes"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            metadata=json.loads(row["metadata_json"] or "{}"),
+        )
