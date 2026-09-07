@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from src.config import AppSettings
+
+if TYPE_CHECKING:
+    from playwright.sync_api import BrowserContext, Page
 
 
 class BrowserState(StrEnum):
@@ -64,7 +68,9 @@ class PageInfo(BaseModel):
 class BrowserCallbacks:
     """Optional lifecycle callbacks invoked by `BrowserManager`."""
 
+    on_context_created: Callable[[BrowserContext], None] | None = None
     on_page_opened: Callable[[PageInfo], None] | None = None
+    on_page_attached: Callable[[str, Page], None] | None = None
     on_page_navigated: Callable[[PageInfo], None] | None = None
     on_page_closed: Callable[[PageInfo], None] | None = None
     on_disconnected: Callable[[], None] | None = None

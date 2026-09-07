@@ -62,6 +62,13 @@ class BrowserManager:
         """Return snapshots of all tracked pages ordered by tab index."""
         return sorted(self._page_info.values(), key=lambda info: info.tab_index)
 
+    def get_page_id(self, page: Page) -> str | None:
+        """Return the tracked `page_id` for a Playwright `Page`, or None if unknown."""
+        for page_id, tracked in self._pages.items():
+            if tracked == page:
+                return page_id
+        return None
+
     def launch(self, config: BrowserLaunchConfig) -> PageInfo:
         """Launch Chromium, create a context, open the initial page, and navigate."""
         if self._state in {BrowserState.LAUNCHING, BrowserState.RUNNING}:
@@ -88,6 +95,8 @@ class BrowserManager:
                 }
             )
             self._context.set_default_timeout(config.default_timeout_ms)
+            if self._callbacks.on_context_created is not None:
+                self._callbacks.on_context_created(self._context)
             self._context.on("page", self._handle_context_page)
 
             initial_page = self._context.new_page()
@@ -208,6 +217,8 @@ class BrowserManager:
 
         if self._callbacks.on_page_opened is not None:
             self._callbacks.on_page_opened(info)
+        if self._callbacks.on_page_attached is not None:
+            self._callbacks.on_page_attached(page_id, page)
         return info
 
     def _handle_context_page(self, page: Page) -> None:
