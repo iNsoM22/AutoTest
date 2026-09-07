@@ -74,6 +74,7 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
         app_context.settings,
         app_context.project_service,
         app_context.session_service,
+        app_context.event_repository,
         browser_manager_factory=_FakeBrowserManager,
     )
     qtbot.addWidget(window)
@@ -99,3 +100,5 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
     pages = app_context.session_service.list_pages(sessions[0].id)
     assert len(pages) == 1
     assert pages[0].closed_at is not None
+    # Tab open + tab close events were persisted to raw_events
+    assert app_context.event_repository.count_by_session(sessions[0].id) >= 2

@@ -1,14 +1,18 @@
-"""Background Qt worker thread for running the Playwright Chromium session."""
+"""Background Qt worker thread for running Playwright Chromium and hybrid recording."""
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from src.browser import BrowserCallbacks, BrowserLaunchConfig, BrowserManager, PageInfo
+from src.projects import SessionService
+from src.recording import RawEvent, RecordingEngine
+from src.storage import RawEventRepository
 
 logger = logging.getLogger(__name__)
 
@@ -20,30 +24,43 @@ def _default_browser_manager_factory(callbacks: BrowserCallbacks) -> BrowserMana
 
 
 class BrowserSessionWorker(QThread):
-    """Owns a `BrowserManager` on a dedicated thread so the Qt UI stays responsive."""
+    """Owns `BrowserManager` and `RecordingEngine` off the Qt UI thread."""
 
     session_started = Signal(str)
     page_opened = Signal(str, object)
     page_navigated = Signal(str, object)
     page_closed = Signal(str, object)
+    events_recorded = Signal(str, int, object)
     session_finished = Signal(str)
     session_failed = Signal(str, str)
 
     def __init__(
         self,
+        project_id: str,
         session_id: str,
         launch_config: BrowserLaunchConfig,
+        session_service: SessionService,
+        event_repository: RawEventRepository,
         *,
+        batch_size: int = 50,
         manager_factory: BrowserManagerFactory | None = None,
         poll_interval_ms: int = 100,
+        ui_flush_interval_s: float = 0.25,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
+        self._project_id = project_id
         self._session_id = session_id
         self._launch_config = launch_config
+        self._session_service = session_service
+        self._event_repository = event_repository
+        self._batch_size = batch_size
         self._manager_factory = manager_factory or _default_browser_manager_factory
         self._poll_interval_ms = poll_interval_ms
+        self._ui_flush_interval_s = ui_flush_interval_s
         self._stop_event = threading.Event()
+        self._pending_ui_events: list[RawEvent] = []
+        self._ui_lock = threading.Lock()
 
     @property
     def session_id(self) -> str:
@@ -55,20 +72,69 @@ class BrowserSessionWorker(QThread):
         self._stop_event.set()
 
     def run(self) -> None:
-        """Launch Chromium, pump browser events until stopped or closed, then clean up."""
+        """Launch Chromium, attach hybrid observers, pump events, and flush on stop."""
+        manager_ref: list[BrowserManager] = []
+
+        def resolve_page_id(page: object) -> str | None:
+            if not manager_ref:
+                return None
+            return manager_ref[0].get_page_id(page)  # type: ignore[arg-type]
+
+        engine = RecordingEngine(
+            self._event_repository,
+            project_id=self._project_id,
+            session_id=self._session_id,
+            page_id_resolver=resolve_page_id,
+            batch_size=self._batch_size,
+            on_event=self._queue_ui_event,
+        )
+
+        def handle_page_opened(info: PageInfo) -> None:
+            # Persist browser_pages row synchronously before any raw_events reference page_id.
+            self._session_service.register_page(
+                self._session_id,
+                page_id=info.page_id,
+                tab_index=info.tab_index,
+                url=info.url,
+                title=info.title,
+            )
+            engine.on_page_opened(info)
+            self.page_opened.emit(self._session_id, info)
+
+        def handle_page_navigated(info: PageInfo) -> None:
+            self._session_service.update_page(info.page_id, url=info.url, title=info.title)
+            engine.on_page_navigated(info)
+            self.page_navigated.emit(self._session_id, info)
+
+        def handle_page_closed(info: PageInfo) -> None:
+            self._session_service.close_page(info.page_id)
+            engine.on_page_closed(info)
+            self.page_closed.emit(self._session_id, info)
+
         callbacks = BrowserCallbacks(
-            on_page_opened=self._emit_page_opened,
-            on_page_navigated=self._emit_page_navigated,
-            on_page_closed=self._emit_page_closed,
+            on_context_created=engine.attach_context,
+            on_page_opened=handle_page_opened,
+            on_page_attached=engine.attach_page,
+            on_page_navigated=handle_page_navigated,
+            on_page_closed=handle_page_closed,
             on_disconnected=self._stop_event.set,
         )
         manager = self._manager_factory(callbacks)
+        manager_ref.append(manager)
+
+        last_flush = time.monotonic()
         try:
             manager.launch(self._launch_config)
             self.session_started.emit(self._session_id)
+            self._emit_pending_ui_events(engine.event_count)
 
             while not self._stop_event.is_set():
                 still_alive = manager.poll_events(self._poll_interval_ms)
+                now = time.monotonic()
+                if now - last_flush >= self._ui_flush_interval_s:
+                    engine.flush()
+                    self._emit_pending_ui_events(engine.event_count)
+                    last_flush = now
                 if not still_alive:
                     break
         except Exception as exc:
@@ -80,14 +146,22 @@ class BrowserSessionWorker(QThread):
                 manager.close()
             except Exception:
                 logger.debug("Ignored error during browser worker cleanup", exc_info=True)
+            try:
+                engine.flush()
+                self._emit_pending_ui_events(engine.event_count)
+            except Exception:
+                logger.exception("Failed to flush recorded events for session %s", self._session_id)
 
         self.session_finished.emit(self._session_id)
 
-    def _emit_page_opened(self, info: PageInfo) -> None:
-        self.page_opened.emit(self._session_id, info)
+    def _queue_ui_event(self, event: RawEvent) -> None:
+        with self._ui_lock:
+            self._pending_ui_events.append(event)
 
-    def _emit_page_navigated(self, info: PageInfo) -> None:
-        self.page_navigated.emit(self._session_id, info)
-
-    def _emit_page_closed(self, info: PageInfo) -> None:
-        self.page_closed.emit(self._session_id, info)
+    def _emit_pending_ui_events(self, total_count: int) -> None:
+        with self._ui_lock:
+            if not self._pending_ui_events:
+                return
+            batch = self._pending_ui_events
+            self._pending_ui_events = []
+        self.events_recorded.emit(self._session_id, total_count, batch)

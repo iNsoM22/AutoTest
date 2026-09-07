@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from src import __version__
 from src.config import AppSettings, configure_logging, get_settings
 from src.projects import ProjectRepository, ProjectService, SessionRepository, SessionService
-from src.storage import ArtifactManager, Database
+from src.storage import ArtifactManager, ArtifactRepository, Database, RawEventRepository
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,8 @@ class AppContext:
     settings: AppSettings
     database: Database
     artifacts: ArtifactManager
+    artifact_repository: ArtifactRepository
+    event_repository: RawEventRepository
     project_service: ProjectService
     session_service: SessionService
 
@@ -52,6 +54,8 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
 
     artifacts = ArtifactManager(active_settings.artifacts_dir)
     artifacts.ensure_base_dir()
+    artifact_repo = ArtifactRepository(database)
+    event_repo = RawEventRepository(database)
 
     project_repo = ProjectRepository(database)
     session_repo = SessionRepository(database)
@@ -63,6 +67,8 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         settings=active_settings,
         database=database,
         artifacts=artifacts,
+        artifact_repository=artifact_repo,
+        event_repository=event_repo,
         project_service=project_service,
         session_service=session_service,
     )
@@ -100,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             context.settings,
             context.project_service,
             context.session_service,
+            context.event_repository,
         )
         window.show()
         return int(app.exec())

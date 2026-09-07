@@ -1,4 +1,4 @@
-"""Main PySide6 desktop window for AutoTest Phase 1."""
+"""Main PySide6 desktop window for AutoTest."""
 
 from __future__ import annotations
 
@@ -40,20 +40,25 @@ from src.projects import (
     RecordingSession,
     SessionService,
 )
+from src.recording import RawEvent
+from src.storage import RawEventRepository
 from src.ui.dialogs import ProjectDialog
 from src.ui.workers import BrowserManagerFactory, BrowserSessionWorker
 
 logger = logging.getLogger(__name__)
 
+_MAX_VISIBLE_EVENTS = 500
+
 
 class MainWindow(QMainWindow):
-    """Primary desktop application shell for project and recording session management."""
+    """Primary desktop application shell for projects, sessions, and live recordings."""
 
     def __init__(
         self,
         settings: AppSettings,
         project_service: ProjectService,
         session_service: SessionService,
+        event_repository: RawEventRepository,
         *,
         browser_manager_factory: BrowserManagerFactory | None = None,
         parent: QWidget | None = None,
@@ -62,6 +67,7 @@ class MainWindow(QMainWindow):
         self._settings = settings
         self._project_service = project_service
         self._session_service = session_service
+        self._event_repository = event_repository
         self._browser_manager_factory = browser_manager_factory
 
         self._projects: dict[str, Project] = {}
@@ -69,9 +75,10 @@ class MainWindow(QMainWindow):
         self._active_session_id: str | None = None
         self._active_worker: BrowserSessionWorker | None = None
         self._tracked_pages: dict[str, PageInfo] = {}
+        self._event_count: int = 0
 
         self.setWindowTitle(f"AutoTest v{__version__}")
-        self.resize(1140, 720)
+        self.resize(1180, 740)
 
         self._build_ui()
         self._refresh_projects()
@@ -82,7 +89,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_workspace())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([280, 860])
+        splitter.setSizes([280, 900])
 
         self.setCentralWidget(splitter)
 
@@ -180,9 +187,9 @@ class MainWindow(QMainWindow):
         sessions_layout.setContentsMargins(10, 10, 10, 10)
         sessions_layout.setSpacing(8)
 
-        self.sessions_table = QTableWidget(0, 5, sessions_tab)
+        self.sessions_table = QTableWidget(0, 6, sessions_tab)
         self.sessions_table.setHorizontalHeaderLabels(
-            ["Session", "Status", "Start URL", "Started", "Ended"]
+            ["Session", "Status", "Events", "Start URL", "Started", "Ended"]
         )
         self.sessions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.sessions_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -191,9 +198,10 @@ class MainWindow(QMainWindow):
             0, QHeaderView.ResizeMode.ResizeToContents
         )
         self.sessions_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Stretch
+            3, QHeaderView.ResizeMode.Stretch
         )
         self.sessions_table.verticalHeader().setVisible(False)
+        self.sessions_table.itemSelectionChanged.connect(self._on_session_selection_changed)
 
         sessions_actions = QHBoxLayout()
         sessions_actions.addStretch(1)
@@ -220,6 +228,30 @@ class MainWindow(QMainWindow):
         self.pages_table.verticalHeader().setVisible(False)
         pages_layout.addWidget(self.pages_table)
         self.tabs.addTab(pages_tab, "Browser Tabs")
+
+        # Tab 3: Recorded raw events
+        events_tab = QWidget(panel)
+        events_layout = QVBoxLayout(events_tab)
+        events_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.events_table = QTableWidget(0, 5, events_tab)
+        self.events_table.setHorizontalHeaderLabels(
+            ["#", "Event Type", "Source", "Target / Details", "Timestamp"]
+        )
+        self.events_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.events_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.events_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.events_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.events_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.events_table.verticalHeader().setVisible(False)
+        events_layout.addWidget(self.events_table)
+        self.tabs.addTab(events_tab, "Recorded Events (0)")
 
         layout.addLayout(header_row)
         layout.addWidget(divider)
@@ -285,6 +317,7 @@ class MainWindow(QMainWindow):
             self.record_toggle_btn.setEnabled(False)
             self.sessions_table.setRowCount(0)
             self.delete_session_btn.setEnabled(False)
+            self._clear_events_table()
             return
 
         self.project_title_label.setText(project.name)
@@ -372,6 +405,7 @@ class MainWindow(QMainWindow):
     def _populate_session_row(self, row_idx: int, session: RecordingSession) -> None:
         name_item = QTableWidgetItem(session.name)
         name_item.setData(Qt.ItemDataRole.UserRole, session.id)
+        event_count = self._event_repository.count_by_session(session.id)
         started_str = (
             session.started_at.strftime("%Y-%m-%d %H:%M:%S") if session.started_at else "-"
         )
@@ -379,9 +413,22 @@ class MainWindow(QMainWindow):
 
         self.sessions_table.setItem(row_idx, 0, name_item)
         self.sessions_table.setItem(row_idx, 1, QTableWidgetItem(session.status.value))
-        self.sessions_table.setItem(row_idx, 2, QTableWidgetItem(session.start_url))
-        self.sessions_table.setItem(row_idx, 3, QTableWidgetItem(started_str))
-        self.sessions_table.setItem(row_idx, 4, QTableWidgetItem(ended_str))
+        self.sessions_table.setItem(row_idx, 2, QTableWidgetItem(str(event_count)))
+        self.sessions_table.setItem(row_idx, 3, QTableWidgetItem(session.start_url))
+        self.sessions_table.setItem(row_idx, 4, QTableWidgetItem(started_str))
+        self.sessions_table.setItem(row_idx, 5, QTableWidgetItem(ended_str))
+
+    def _on_session_selection_changed(self) -> None:
+        if self._active_worker is not None:
+            return
+        row = self.sessions_table.currentRow()
+        if row < 0:
+            return
+        item = self.sessions_table.item(row, 0)
+        if item is None:
+            return
+        session_id = str(item.data(Qt.ItemDataRole.UserRole))
+        self._load_session_events(session_id)
 
     def _on_delete_session(self) -> None:
         row = self.sessions_table.currentRow()
@@ -396,6 +443,7 @@ class MainWindow(QMainWindow):
         except ProjectError as exc:
             QMessageBox.warning(self, "Could Not Delete Session", str(exc))
             return
+        self._clear_events_table()
         self._refresh_sessions(self._selected_project_id)
 
     def _on_toggle_recording(self) -> None:
@@ -423,11 +471,16 @@ class MainWindow(QMainWindow):
         self._active_session_id = session.id
         self._tracked_pages.clear()
         self._refresh_pages_table()
+        self._clear_events_table()
 
         config = BrowserLaunchConfig.from_settings(self._settings, start_url=session.start_url)
         worker = BrowserSessionWorker(
+            self._selected_project_id,
             session.id,
             config,
+            self._session_service,
+            self._event_repository,
+            batch_size=self._settings.event_batch_size,
             manager_factory=self._browser_manager_factory,
             parent=self,
         )
@@ -435,6 +488,7 @@ class MainWindow(QMainWindow):
         worker.page_opened.connect(self._on_worker_page_opened)
         worker.page_navigated.connect(self._on_worker_page_navigated)
         worker.page_closed.connect(self._on_worker_page_closed)
+        worker.events_recorded.connect(self._on_worker_events_recorded)
         worker.session_finished.connect(self._on_worker_finished)
         worker.session_failed.connect(self._on_worker_failed)
 
@@ -463,39 +517,40 @@ class MainWindow(QMainWindow):
         if session_id != self._active_session_id:
             return
         self._set_status_badge("Recording Active", "active")
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(2)
         self.statusBar().showMessage("Chromium running — recording session active.")
 
-    def _on_worker_page_opened(self, session_id: str, info_obj: object) -> None:
+    def _on_worker_page_opened(self, _session_id: str, info_obj: object) -> None:
         if not isinstance(info_obj, PageInfo):
             return
         self._tracked_pages[info_obj.page_id] = info_obj
-        self._session_service.register_page(
-            session_id,
-            page_id=info_obj.page_id,
-            tab_index=info_obj.tab_index,
-            url=info_obj.url,
-            title=info_obj.title,
-        )
         self._refresh_pages_table()
 
     def _on_worker_page_navigated(self, _session_id: str, info_obj: object) -> None:
         if not isinstance(info_obj, PageInfo):
             return
         self._tracked_pages[info_obj.page_id] = info_obj
-        self._session_service.update_page(
-            info_obj.page_id,
-            url=info_obj.url,
-            title=info_obj.title,
-        )
         self._refresh_pages_table()
 
     def _on_worker_page_closed(self, _session_id: str, info_obj: object) -> None:
         if not isinstance(info_obj, PageInfo):
             return
         self._tracked_pages[info_obj.page_id] = info_obj
-        self._session_service.close_page(info_obj.page_id)
         self._refresh_pages_table()
+
+    def _on_worker_events_recorded(
+        self,
+        session_id: str,
+        total_count: int,
+        batch_obj: object,
+    ) -> None:
+        if session_id != self._active_session_id or not isinstance(batch_obj, list):
+            return
+        self._event_count = total_count
+        self.tabs.setTabText(2, f"Recorded Events ({total_count})")
+        for event in batch_obj:
+            if isinstance(event, RawEvent):
+                self._append_event_row(event)
 
     def _on_worker_finished(self, session_id: str) -> None:
         try:
@@ -504,7 +559,10 @@ class MainWindow(QMainWindow):
             logger.debug("Session %s already in terminal state", session_id)
         self._cleanup_worker()
         self._set_status_badge("Idle", "idle")
-        self.statusBar().showMessage("Recording session stopped.", 5000)
+        self.statusBar().showMessage(
+            f"Recording session stopped ({self._event_count} events captured).",
+            5000,
+        )
 
     def _on_worker_failed(self, session_id: str, error_message: str) -> None:
         try:
@@ -539,6 +597,65 @@ class MainWindow(QMainWindow):
             self.pages_table.setItem(
                 row_idx, 3, QTableWidgetItem("Closed" if page.is_closed else "Open")
             )
+
+    def _clear_events_table(self) -> None:
+        self._event_count = 0
+        self.events_table.setRowCount(0)
+        self.tabs.setTabText(2, "Recorded Events (0)")
+
+    def _load_session_events(self, session_id: str) -> None:
+        total = self._event_repository.count_by_session(session_id)
+        events = self._event_repository.list_by_session(session_id, limit=_MAX_VISIBLE_EVENTS)
+        self._event_count = total
+        self.events_table.setRowCount(0)
+        self.tabs.setTabText(2, f"Recorded Events ({total})")
+        for event in events:
+            self._append_event_row(event)
+
+    def _append_event_row(self, event: RawEvent) -> None:
+        if self.events_table.rowCount() >= _MAX_VISIBLE_EVENTS:
+            self.events_table.removeRow(0)
+        row_idx = self.events_table.rowCount()
+        self.events_table.insertRow(row_idx)
+        self.events_table.setItem(row_idx, 0, QTableWidgetItem(str(event.sequence_no)))
+        self.events_table.setItem(row_idx, 1, QTableWidgetItem(event.event_type.value))
+        self.events_table.setItem(row_idx, 2, QTableWidgetItem(event.source.value))
+        self.events_table.setItem(row_idx, 3, QTableWidgetItem(self._summarize_event(event)))
+        self.events_table.setItem(
+            row_idx, 4, QTableWidgetItem(event.timestamp.strftime("%H:%M:%S.%f")[:-3])
+        )
+
+    @staticmethod
+    def _summarize_event(event: RawEvent) -> str:
+        target = event.target
+        payload = event.payload
+        if target:
+            label = (
+                target.get("text")
+                or target.get("aria_label")
+                or target.get("test_id")
+                or target.get("id")
+                or target.get("name")
+                or target.get("css_path")
+                or target.get("tag", "")
+            )
+            value = payload.get("value")
+            if value is not None and value != "":
+                return f"{label} = {value}"
+            if "key" in payload:
+                return f"{label} [{payload['key']}]"
+            return str(label)
+        if "status" in payload:
+            return f"{payload.get('method', '')} {payload.get('status')} {payload.get('url', '')}"
+        if "url" in payload:
+            method = payload.get("method", "")
+            prefix = f"{method} " if method else ""
+            return f"{prefix}{payload['url']}"
+        if "text" in payload:
+            return f"[{payload.get('level', 'log')}] {payload['text']}"
+        if "message" in payload:
+            return str(payload["message"])
+        return ""
 
     def _set_status_badge(self, text: str, state: str) -> None:
         self.status_badge.setText(text)
