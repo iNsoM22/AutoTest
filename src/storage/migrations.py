@@ -106,11 +106,62 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_project_session
     ON artifacts (project_id, session_id);
 """
 
+_MIGRATION_002_SQL = """
+CREATE TABLE IF NOT EXISTS processed_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    page_id TEXT,
+    order_index INTEGER NOT NULL,
+    action_type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    target_json TEXT NOT NULL DEFAULT '{}',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    outcomes_json TEXT NOT NULL DEFAULT '[]',
+    raw_event_ids_json TEXT NOT NULL DEFAULT '[]',
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (page_id) REFERENCES browser_pages(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_processed_events_session_order
+    ON processed_events (session_id, order_index);
+
+CREATE TABLE IF NOT EXISTS scenarios (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    order_index INTEGER NOT NULL,
+    included INTEGER NOT NULL DEFAULT 1,
+    processed_event_ids_json TEXT NOT NULL DEFAULT '[]',
+    raw_event_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_scenarios_session_order
+    ON scenarios (session_id, order_index);
+
+CREATE INDEX IF NOT EXISTS idx_scenarios_project
+    ON scenarios (project_id);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
         name="initial_schema",
         sql=_MIGRATION_001_SQL,
+    ),
+    Migration(
+        version=2,
+        name="processed_events_and_scenarios",
+        sql=_MIGRATION_002_SQL,
     ),
 )
 

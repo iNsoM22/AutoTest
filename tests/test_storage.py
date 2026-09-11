@@ -15,8 +15,8 @@ def test_database_initializes_with_wal_and_foreign_keys(tmp_settings: AppSetting
     db = Database(tmp_settings.db_path, wal_mode=True)
     try:
         applied = db.initialize()
-        assert applied == [1]
-        assert get_schema_version(db) == 1
+        assert applied == [1, 2]
+        assert get_schema_version(db) == 2
 
         conn = db.connect()
         fk_enabled = conn.execute("PRAGMA foreign_keys;").fetchone()[0]
@@ -35,6 +35,8 @@ def test_database_initializes_with_wal_and_foreign_keys(tmp_settings: AppSetting
             "browser_pages",
             "raw_events",
             "artifacts",
+            "processed_events",
+            "scenarios",
         }.issubset(tables)
     finally:
         db.close_all()
@@ -43,9 +45,9 @@ def test_database_initializes_with_wal_and_foreign_keys(tmp_settings: AppSetting
 def test_migrations_are_idempotent(tmp_settings: AppSettings) -> None:
     db = Database(tmp_settings.db_path)
     try:
-        assert run_migrations(db) == [1]
+        assert run_migrations(db) == [1, 2]
         assert run_migrations(db) == []
-        assert get_schema_version(db) == 1
+        assert get_schema_version(db) == 2
     finally:
         db.close_all()
 
