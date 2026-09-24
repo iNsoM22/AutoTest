@@ -9,7 +9,9 @@ from dataclasses import dataclass
 
 from src import __version__
 from src.config import AppSettings, configure_logging, get_settings
+from src.processing import ProcessedEventRepository
 from src.projects import ProjectRepository, ProjectService, SessionRepository, SessionService
+from src.scenarios import ScenarioRepository, ScenarioService
 from src.storage import ArtifactManager, ArtifactRepository, Database, RawEventRepository
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,8 @@ class AppContext:
     artifacts: ArtifactManager
     artifact_repository: ArtifactRepository
     event_repository: RawEventRepository
+    processed_event_repository: ProcessedEventRepository
+    scenario_service: ScenarioService
     project_service: ProjectService
     session_service: SessionService
 
@@ -56,11 +60,19 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
     artifacts.ensure_base_dir()
     artifact_repo = ArtifactRepository(database)
     event_repo = RawEventRepository(database)
+    processed_event_repo = ProcessedEventRepository(database)
+    scenario_repo = ScenarioRepository(database)
 
     project_repo = ProjectRepository(database)
     session_repo = SessionRepository(database)
     project_service = ProjectService(project_repo, artifacts)
     session_service = SessionService(session_repo, project_repo, artifacts)
+    scenario_service = ScenarioService(
+        session_repo,
+        event_repo,
+        processed_event_repo,
+        scenario_repo,
+    )
     session_service.recover_interrupted_sessions()
 
     return AppContext(
@@ -69,6 +81,8 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         artifacts=artifacts,
         artifact_repository=artifact_repo,
         event_repository=event_repo,
+        processed_event_repository=processed_event_repo,
+        scenario_service=scenario_service,
         project_service=project_service,
         session_service=session_service,
     )
@@ -107,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             context.project_service,
             context.session_service,
             context.event_repository,
+            scenario_service=context.scenario_service,
         )
         window.show()
         return int(app.exec())

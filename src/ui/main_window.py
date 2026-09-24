@@ -41,8 +41,10 @@ from src.projects import (
     SessionService,
 )
 from src.recording import RawEvent
+from src.scenarios import ScenarioService
 from src.storage import RawEventRepository
 from src.ui.dialogs import ProjectDialog
+from src.ui.review_widget import ReviewWidget
 from src.ui.workers import BrowserManagerFactory, BrowserSessionWorker
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ class MainWindow(QMainWindow):
         session_service: SessionService,
         event_repository: RawEventRepository,
         *,
+        scenario_service: ScenarioService | None = None,
         browser_manager_factory: BrowserManagerFactory | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -68,7 +71,9 @@ class MainWindow(QMainWindow):
         self._project_service = project_service
         self._session_service = session_service
         self._event_repository = event_repository
+        self._scenario_service = scenario_service
         self._browser_manager_factory = browser_manager_factory
+        self.review_widget: ReviewWidget | None = None
 
         self._projects: dict[str, Project] = {}
         self._selected_project_id: str | None = None
@@ -205,8 +210,12 @@ class MainWindow(QMainWindow):
 
         sessions_actions = QHBoxLayout()
         sessions_actions.addStretch(1)
+        self.review_session_btn = QPushButton("Process & Review", sessions_tab)
+        self.review_session_btn.setObjectName("primaryButton")
+        self.review_session_btn.clicked.connect(self._on_review_selected_session)
         self.delete_session_btn = QPushButton("Delete Selected Session", sessions_tab)
         self.delete_session_btn.clicked.connect(self._on_delete_session)
+        sessions_actions.addWidget(self.review_session_btn)
         sessions_actions.addWidget(self.delete_session_btn)
 
         sessions_layout.addWidget(self.sessions_table, stretch=1)
@@ -252,6 +261,11 @@ class MainWindow(QMainWindow):
         self.events_table.verticalHeader().setVisible(False)
         events_layout.addWidget(self.events_table)
         self.tabs.addTab(events_tab, "Recorded Events (0)")
+
+        # Tab 4: Timeline & Scenarios review
+        if self._scenario_service is not None:
+            self.review_widget = ReviewWidget(self._scenario_service, panel)
+            self.tabs.addTab(self.review_widget, "Timeline & Scenarios")
 
         layout.addLayout(header_row)
         layout.addWidget(divider)
@@ -317,7 +331,10 @@ class MainWindow(QMainWindow):
             self.record_toggle_btn.setEnabled(False)
             self.sessions_table.setRowCount(0)
             self.delete_session_btn.setEnabled(False)
+            self.review_session_btn.setEnabled(False)
             self._clear_events_table()
+            if self.review_widget is not None:
+                self.review_widget.load_session(None)
             return
 
         self.project_title_label.setText(project.name)
@@ -401,6 +418,9 @@ class MainWindow(QMainWindow):
         for row_idx, session in enumerate(sessions):
             self._populate_session_row(row_idx, session)
         self.delete_session_btn.setEnabled(bool(sessions) and self._active_worker is None)
+        self.review_session_btn.setEnabled(
+            bool(sessions) and self._active_worker is None and self.review_widget is not None
+        )
 
     def _populate_session_row(self, row_idx: int, session: RecordingSession) -> None:
         name_item = QTableWidgetItem(session.name)
@@ -429,6 +449,25 @@ class MainWindow(QMainWindow):
             return
         session_id = str(item.data(Qt.ItemDataRole.UserRole))
         self._load_session_events(session_id)
+        if self.review_widget is not None:
+            self.review_widget.load_session(session_id, item.text())
+
+    def _on_review_selected_session(self) -> None:
+        if self.review_widget is None:
+            return
+        row = self.sessions_table.currentRow()
+        if row < 0 and self.sessions_table.rowCount() > 0:
+            row = 0
+            self.sessions_table.selectRow(0)
+        if row < 0:
+            return
+        item = self.sessions_table.item(row, 0)
+        if item is None:
+            return
+        session_id = str(item.data(Qt.ItemDataRole.UserRole))
+        self.review_widget.load_session(session_id, item.text())
+        self.review_widget.process_current_session()
+        self.tabs.setCurrentWidget(self.review_widget)
 
     def _on_delete_session(self) -> None:
         row = self.sessions_table.currentRow()
@@ -444,6 +483,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Could Not Delete Session", str(exc))
             return
         self._clear_events_table()
+        if self.review_widget is not None:
+            self.review_widget.load_session(None)
         self._refresh_sessions(self._selected_project_id)
 
     def _on_toggle_recording(self) -> None:
@@ -558,6 +599,8 @@ class MainWindow(QMainWindow):
         except ProjectError:
             logger.debug("Session %s already in terminal state", session_id)
         self._cleanup_worker()
+        if self.review_widget is not None:
+            self.review_widget.load_session(session_id)
         self._set_status_badge("Idle", "idle")
         self.statusBar().showMessage(
             f"Recording session stopped ({self._event_count} events captured).",

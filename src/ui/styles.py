@@ -59,7 +59,7 @@ QLabel#statusBadge[state="error"] {
     color: #fca5a5;
 }
 
-QListWidget, QTableWidget, QLineEdit, QTextEdit {
+QListWidget, QTableWidget, QLineEdit, QTextEdit, QPlainTextEdit {
     background-color: #1e2128;
     color: #e6e8ee;
     border: 1px solid #2e3440;

@@ -75,6 +75,7 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
         app_context.project_service,
         app_context.session_service,
         app_context.event_repository,
+        scenario_service=app_context.scenario_service,
         browser_manager_factory=_FakeBrowserManager,
     )
     qtbot.addWidget(window)
@@ -102,3 +103,11 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
     assert pages[0].closed_at is not None
     # Tab open + tab close events were persisted to raw_events
     assert app_context.event_repository.count_by_session(sessions[0].id) >= 2
+
+    # Process and review the recorded session in the Timeline & Scenarios tab
+    assert window.review_widget is not None
+    window.review_widget.process_current_session()
+    assert window.review_widget.scenarios_list.count() >= 1
+    assert window.review_widget.timeline_table.rowCount() >= 1
+    window.review_widget.timeline_table.selectRow(0)
+    assert "raw_event_ids" in window.review_widget.evidence_inspector.toPlainText()
