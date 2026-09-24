@@ -152,6 +152,37 @@ CREATE INDEX IF NOT EXISTS idx_scenarios_project
     ON scenarios (project_id);
 """
 
+_MIGRATION_003_SQL = """
+CREATE TABLE IF NOT EXISTS test_definitions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    scenario_id TEXT,
+    name TEXT NOT NULL,
+    function_name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL,
+    order_index INTEGER NOT NULL,
+    included INTEGER NOT NULL DEFAULT 1,
+    prerequisites_json TEXT NOT NULL DEFAULT '[]',
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    assertions_json TEXT NOT NULL DEFAULT '[]',
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    raw_event_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (scenario_id) REFERENCES scenarios(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_test_definitions_session_order
+    ON test_definitions (session_id, order_index);
+
+CREATE INDEX IF NOT EXISTS idx_test_definitions_project
+    ON test_definitions (project_id);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -162,6 +193,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=2,
         name="processed_events_and_scenarios",
         sql=_MIGRATION_002_SQL,
+    ),
+    Migration(
+        version=3,
+        name="test_definitions",
+        sql=_MIGRATION_003_SQL,
     ),
 )
 
