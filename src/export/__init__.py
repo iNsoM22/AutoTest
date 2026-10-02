@@ -1,1 +1,5 @@
-"""Copy and project integration service for generated tests and fixtures."""
+"""Copy and filesystem export service for generated Pytest + Playwright code."""
+
+from src.export.service import CopyExportService
+
+__all__ = ["CopyExportService"]
