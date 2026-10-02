@@ -76,6 +76,8 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
         app_context.session_service,
         app_context.event_repository,
         scenario_service=app_context.scenario_service,
+        definition_service=app_context.definition_service,
+        copy_service=app_context.copy_service,
         browser_manager_factory=_FakeBrowserManager,
     )
     qtbot.addWidget(window)
@@ -111,3 +113,12 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
     assert window.review_widget.timeline_table.rowCount() >= 1
     window.review_widget.timeline_table.selectRow(0)
     assert "raw_event_ids" in window.review_widget.evidence_inspector.toPlainText()
+
+    # Generate test definitions and preview standalone Pytest code in the Test Definitions tab
+    assert window.definitions_widget is not None
+    window.definitions_widget.generate_for_current_session()
+    assert window.definitions_widget.definitions_list.count() >= 1
+    assert window.definitions_widget.actions_table.rowCount() >= 1
+    generated_code = window.definitions_widget.code_preview.toPlainText()
+    assert "from playwright.sync_api import" in generated_code
+    assert "def test_" in generated_code

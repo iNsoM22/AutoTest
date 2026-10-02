@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
 from src import __version__
 from src.browser import BrowserLaunchConfig, PageInfo
 from src.config import AppSettings
+from src.definitions import TestDefinitionService
+from src.export import CopyExportService
 from src.projects import (
     Project,
     ProjectCreate,
@@ -43,6 +45,7 @@ from src.projects import (
 from src.recording import RawEvent
 from src.scenarios import ScenarioService
 from src.storage import RawEventRepository
+from src.ui.definitions_widget import DefinitionsWidget
 from src.ui.dialogs import ProjectDialog
 from src.ui.review_widget import ReviewWidget
 from src.ui.workers import BrowserManagerFactory, BrowserSessionWorker
@@ -63,6 +66,8 @@ class MainWindow(QMainWindow):
         event_repository: RawEventRepository,
         *,
         scenario_service: ScenarioService | None = None,
+        definition_service: TestDefinitionService | None = None,
+        copy_service: CopyExportService | None = None,
         browser_manager_factory: BrowserManagerFactory | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -72,8 +77,11 @@ class MainWindow(QMainWindow):
         self._session_service = session_service
         self._event_repository = event_repository
         self._scenario_service = scenario_service
+        self._definition_service = definition_service
+        self._copy_service = copy_service
         self._browser_manager_factory = browser_manager_factory
         self.review_widget: ReviewWidget | None = None
+        self.definitions_widget: DefinitionsWidget | None = None
 
         self._projects: dict[str, Project] = {}
         self._selected_project_id: str | None = None
@@ -267,6 +275,15 @@ class MainWindow(QMainWindow):
             self.review_widget = ReviewWidget(self._scenario_service, panel)
             self.tabs.addTab(self.review_widget, "Timeline & Scenarios")
 
+        # Tab 5: Test Definitions & Generated Code
+        if self._definition_service is not None:
+            self.definitions_widget = DefinitionsWidget(
+                self._definition_service,
+                self._copy_service,
+                panel,
+            )
+            self.tabs.addTab(self.definitions_widget, "Test Definitions & Code")
+
         layout.addLayout(header_row)
         layout.addWidget(divider)
         layout.addLayout(control_row)
@@ -335,6 +352,8 @@ class MainWindow(QMainWindow):
             self._clear_events_table()
             if self.review_widget is not None:
                 self.review_widget.load_session(None)
+            if self.definitions_widget is not None:
+                self.definitions_widget.load_session(None)
             return
 
         self.project_title_label.setText(project.name)
@@ -451,6 +470,13 @@ class MainWindow(QMainWindow):
         self._load_session_events(session_id)
         if self.review_widget is not None:
             self.review_widget.load_session(session_id, item.text())
+        if self.definitions_widget is not None:
+            project = self._projects.get(self._selected_project_id or "")
+            self.definitions_widget.load_session(
+                session_id,
+                item.text(),
+                base_url=project.base_url if project is not None else "",
+            )
 
     def _on_review_selected_session(self) -> None:
         if self.review_widget is None:
@@ -467,6 +493,13 @@ class MainWindow(QMainWindow):
         session_id = str(item.data(Qt.ItemDataRole.UserRole))
         self.review_widget.load_session(session_id, item.text())
         self.review_widget.process_current_session()
+        if self.definitions_widget is not None:
+            project = self._projects.get(self._selected_project_id or "")
+            self.definitions_widget.load_session(
+                session_id,
+                item.text(),
+                base_url=project.base_url if project is not None else "",
+            )
         self.tabs.setCurrentWidget(self.review_widget)
 
     def _on_delete_session(self) -> None:
@@ -485,6 +518,8 @@ class MainWindow(QMainWindow):
         self._clear_events_table()
         if self.review_widget is not None:
             self.review_widget.load_session(None)
+        if self.definitions_widget is not None:
+            self.definitions_widget.load_session(None)
         self._refresh_sessions(self._selected_project_id)
 
     def _on_toggle_recording(self) -> None:
@@ -601,6 +636,12 @@ class MainWindow(QMainWindow):
         self._cleanup_worker()
         if self.review_widget is not None:
             self.review_widget.load_session(session_id)
+        if self.definitions_widget is not None:
+            project = self._projects.get(self._selected_project_id or "")
+            self.definitions_widget.load_session(
+                session_id,
+                base_url=project.base_url if project is not None else "",
+            )
         self._set_status_badge("Idle", "idle")
         self.statusBar().showMessage(
             f"Recording session stopped ({self._event_count} events captured).",

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from src import __version__
 from src.config import AppSettings, configure_logging, get_settings
+from src.definitions import TestDefinitionRepository, TestDefinitionService
+from src.export import CopyExportService
 from src.processing import ProcessedEventRepository
 from src.projects import ProjectRepository, ProjectService, SessionRepository, SessionService
 from src.scenarios import ScenarioRepository, ScenarioService
@@ -28,6 +30,8 @@ class AppContext:
     event_repository: RawEventRepository
     processed_event_repository: ProcessedEventRepository
     scenario_service: ScenarioService
+    definition_service: TestDefinitionService
+    copy_service: CopyExportService
     project_service: ProjectService
     session_service: SessionService
 
@@ -62,6 +66,7 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
     event_repo = RawEventRepository(database)
     processed_event_repo = ProcessedEventRepository(database)
     scenario_repo = ScenarioRepository(database)
+    definition_repo = TestDefinitionRepository(database)
 
     project_repo = ProjectRepository(database)
     session_repo = SessionRepository(database)
@@ -73,6 +78,14 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         processed_event_repo,
         scenario_repo,
     )
+    definition_service = TestDefinitionService(
+        project_repo,
+        session_repo,
+        processed_event_repo,
+        scenario_repo,
+        definition_repo,
+    )
+    copy_service = CopyExportService()
     session_service.recover_interrupted_sessions()
 
     return AppContext(
@@ -83,6 +96,8 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         event_repository=event_repo,
         processed_event_repository=processed_event_repo,
         scenario_service=scenario_service,
+        definition_service=definition_service,
+        copy_service=copy_service,
         project_service=project_service,
         session_service=session_service,
     )
@@ -122,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
             context.session_service,
             context.event_repository,
             scenario_service=context.scenario_service,
+            definition_service=context.definition_service,
+            copy_service=context.copy_service,
         )
         window.show()
         return int(app.exec())

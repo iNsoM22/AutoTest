@@ -1,5 +1,6 @@
 """PySide6 desktop UI shell, dialogs, and background workers."""
 
+from src.ui.definitions_widget import DefinitionsWidget
 from src.ui.dialogs import ProjectDialog
 from src.ui.main_window import MainWindow
 from src.ui.review_widget import ReviewWidget
@@ -10,6 +11,7 @@ __all__ = [
     "APP_STYLESHEET",
     "BrowserManagerFactory",
     "BrowserSessionWorker",
+    "DefinitionsWidget",
     "MainWindow",
     "ProjectDialog",
     "ReviewWidget",

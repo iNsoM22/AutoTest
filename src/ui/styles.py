@@ -10,7 +10,7 @@ QMainWindow, QDialog {
     font-size: 13px;
 }
 
-QLabel {
+QLabel, QCheckBox {
     color: #e6e8ee;
 }
 
