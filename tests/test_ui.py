@@ -78,6 +78,7 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
         scenario_service=app_context.scenario_service,
         definition_service=app_context.definition_service,
         copy_service=app_context.copy_service,
+        execution_service=app_context.execution_service,
         browser_manager_factory=_FakeBrowserManager,
     )
     qtbot.addWidget(window)
@@ -122,3 +123,12 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
     generated_code = window.definitions_widget.code_preview.toPlainText()
     assert "from playwright.sync_api import" in generated_code
     assert "def test_" in generated_code
+
+    # Test Execution tab syncs generated definitions and enables run actions
+    assert window.execution_widget is not None
+    window.execution_widget.refresh()
+    assert window.execution_widget.tests_list.count() >= 1
+    assert window.execution_widget.run_selected_btn.isEnabled()
+    assert window.execution_widget.run_independent_btn.isEnabled()
+    assert window.execution_widget.run_journey_btn.isEnabled()
+    assert not window.execution_widget.stop_btn.isEnabled()

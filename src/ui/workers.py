@@ -10,6 +10,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QObject, QThread, Signal
 
 from src.browser import BrowserCallbacks, BrowserLaunchConfig, BrowserManager, PageInfo
+from src.execution import ExecutionMode, ExecutionProgressEvent, ExecutionService
 from src.projects import SessionService
 from src.recording import RawEvent, RecordingEngine
 from src.storage import RawEventRepository
@@ -165,3 +166,81 @@ class BrowserSessionWorker(QThread):
             batch = self._pending_ui_events
             self._pending_ui_events = []
         self.events_recorded.emit(self._session_id, total_count, batch)
+
+
+class TestExecutionWorker(QThread):
+    """Runs Pytest execution via `ExecutionService` off the Qt UI thread."""
+
+    __test__ = False
+
+    progress_event = Signal(object)
+    run_completed = Signal(object, object)
+    run_failed = Signal(str)
+
+    def __init__(
+        self,
+        execution_service: ExecutionService,
+        *,
+        session_id: str,
+        definition_ids: list[str] | None = None,
+        mode: ExecutionMode = ExecutionMode.INDEPENDENT,
+        rerun_failed_run_id: str | None = None,
+        headed: bool = False,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._execution_service = execution_service
+        self._session_id = session_id
+        self._definition_ids = definition_ids
+        self._mode = mode
+        self._rerun_failed_run_id = rerun_failed_run_id
+        self._headed = headed
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        """Signal the managed Pytest subprocess to terminate cleanly."""
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        """Execute the configured test run and emit live progress and final results."""
+
+        def _on_event(event: ExecutionProgressEvent) -> None:
+            self.progress_event.emit(event)
+
+        try:
+            if self._rerun_failed_run_id is not None:
+                run, results = self._execution_service.rerun_failed(
+                    self._rerun_failed_run_id,
+                    headed=self._headed,
+                    cancel_event=self._cancel_event,
+                    on_event=_on_event,
+                )
+            elif self._definition_ids is not None:
+                run, results = self._execution_service.execute_definitions(
+                    self._session_id,
+                    self._definition_ids,
+                    self._mode,
+                    headed=self._headed,
+                    cancel_event=self._cancel_event,
+                    on_event=_on_event,
+                )
+            elif self._mode == ExecutionMode.JOURNEY:
+                run, results = self._execution_service.run_journey(
+                    self._session_id,
+                    headed=self._headed,
+                    cancel_event=self._cancel_event,
+                    on_event=_on_event,
+                )
+            else:
+                run, results = self._execution_service.run_independent(
+                    self._session_id,
+                    headed=self._headed,
+                    cancel_event=self._cancel_event,
+                    on_event=_on_event,
+                )
+        except Exception as exc:
+            logger.exception("Test execution worker failed")
+            self.run_failed.emit(str(exc))
+            return
+
+        self.run_completed.emit(run, results)

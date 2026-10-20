@@ -32,6 +32,7 @@ from src import __version__
 from src.browser import BrowserLaunchConfig, PageInfo
 from src.config import AppSettings
 from src.definitions import TestDefinitionService
+from src.execution import ExecutionService
 from src.export import CopyExportService
 from src.projects import (
     Project,
@@ -47,6 +48,7 @@ from src.scenarios import ScenarioService
 from src.storage import RawEventRepository
 from src.ui.definitions_widget import DefinitionsWidget
 from src.ui.dialogs import ProjectDialog
+from src.ui.execution_widget import ExecutionWidget
 from src.ui.review_widget import ReviewWidget
 from src.ui.workers import BrowserManagerFactory, BrowserSessionWorker
 
@@ -68,6 +70,7 @@ class MainWindow(QMainWindow):
         scenario_service: ScenarioService | None = None,
         definition_service: TestDefinitionService | None = None,
         copy_service: CopyExportService | None = None,
+        execution_service: ExecutionService | None = None,
         browser_manager_factory: BrowserManagerFactory | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -79,9 +82,11 @@ class MainWindow(QMainWindow):
         self._scenario_service = scenario_service
         self._definition_service = definition_service
         self._copy_service = copy_service
+        self._execution_service = execution_service
         self._browser_manager_factory = browser_manager_factory
         self.review_widget: ReviewWidget | None = None
         self.definitions_widget: DefinitionsWidget | None = None
+        self.execution_widget: ExecutionWidget | None = None
 
         self._projects: dict[str, Project] = {}
         self._selected_project_id: str | None = None
@@ -284,6 +289,15 @@ class MainWindow(QMainWindow):
             )
             self.tabs.addTab(self.definitions_widget, "Test Definitions & Code")
 
+        # Tab 6: Built-in Test Execution
+        if self._execution_service is not None and self._definition_service is not None:
+            self.execution_widget = ExecutionWidget(
+                self._execution_service,
+                self._definition_service,
+                panel,
+            )
+            self.tabs.addTab(self.execution_widget, "Test Execution")
+
         layout.addLayout(header_row)
         layout.addWidget(divider)
         layout.addLayout(control_row)
@@ -354,6 +368,8 @@ class MainWindow(QMainWindow):
                 self.review_widget.load_session(None)
             if self.definitions_widget is not None:
                 self.definitions_widget.load_session(None)
+            if self.execution_widget is not None:
+                self.execution_widget.load_session(None)
             return
 
         self.project_title_label.setText(project.name)
@@ -477,6 +493,8 @@ class MainWindow(QMainWindow):
                 item.text(),
                 base_url=project.base_url if project is not None else "",
             )
+        if self.execution_widget is not None:
+            self.execution_widget.load_session(session_id, item.text())
 
     def _on_review_selected_session(self) -> None:
         if self.review_widget is None:
@@ -500,6 +518,8 @@ class MainWindow(QMainWindow):
                 item.text(),
                 base_url=project.base_url if project is not None else "",
             )
+        if self.execution_widget is not None:
+            self.execution_widget.load_session(session_id, item.text())
         self.tabs.setCurrentWidget(self.review_widget)
 
     def _on_delete_session(self) -> None:
@@ -520,6 +540,8 @@ class MainWindow(QMainWindow):
             self.review_widget.load_session(None)
         if self.definitions_widget is not None:
             self.definitions_widget.load_session(None)
+        if self.execution_widget is not None:
+            self.execution_widget.load_session(None)
         self._refresh_sessions(self._selected_project_id)
 
     def _on_toggle_recording(self) -> None:
@@ -642,6 +664,8 @@ class MainWindow(QMainWindow):
                 session_id,
                 base_url=project.base_url if project is not None else "",
             )
+        if self.execution_widget is not None:
+            self.execution_widget.load_session(session_id)
         self._set_status_badge("Idle", "idle")
         self.statusBar().showMessage(
             f"Recording session stopped ({self._event_count} events captured).",
@@ -754,7 +778,9 @@ class MainWindow(QMainWindow):
             style.polish(widget)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Ensure any active browser worker stops cleanly before exiting the window."""
+        """Ensure any active browser or execution worker stops cleanly before exiting."""
+        if self.execution_widget is not None:
+            self.execution_widget.shutdown()
         if self._active_worker is not None:
             self._active_worker.request_stop()
             self._active_worker.wait(5000)

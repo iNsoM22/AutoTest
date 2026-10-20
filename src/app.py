@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from src import __version__
 from src.config import AppSettings, configure_logging, get_settings
 from src.definitions import TestDefinitionRepository, TestDefinitionService
+from src.execution import ExecutionRepository, ExecutionService
 from src.export import CopyExportService
 from src.processing import ProcessedEventRepository
 from src.projects import ProjectRepository, ProjectService, SessionRepository, SessionService
@@ -32,6 +33,7 @@ class AppContext:
     scenario_service: ScenarioService
     definition_service: TestDefinitionService
     copy_service: CopyExportService
+    execution_service: ExecutionService
     project_service: ProjectService
     session_service: SessionService
 
@@ -86,6 +88,16 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         definition_repo,
     )
     copy_service = CopyExportService()
+    execution_repo = ExecutionRepository(database)
+    execution_service = ExecutionService(
+        project_repo,
+        session_repo,
+        definition_repo,
+        execution_repo,
+        artifacts,
+        artifact_repo,
+        copy_service=copy_service,
+    )
     session_service.recover_interrupted_sessions()
 
     return AppContext(
@@ -98,6 +110,7 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         scenario_service=scenario_service,
         definition_service=definition_service,
         copy_service=copy_service,
+        execution_service=execution_service,
         project_service=project_service,
         session_service=session_service,
     )
@@ -139,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             scenario_service=context.scenario_service,
             definition_service=context.definition_service,
             copy_service=context.copy_service,
+            execution_service=context.execution_service,
         )
         window.show()
         return int(app.exec())
