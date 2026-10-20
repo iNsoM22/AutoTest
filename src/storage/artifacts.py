@@ -64,6 +64,34 @@ class ArtifactManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def run_dir(self, project_id: str, session_id: str, run_id: str) -> Path:
+        """Return the artifact directory path for a test execution run."""
+        return self._safe_join("projects", project_id, "sessions", session_id, "runs", run_id)
+
+    def ensure_run_dir(self, project_id: str, session_id: str, run_id: str) -> Path:
+        """Create and return the artifact directory for a test execution run."""
+        path = self.run_dir(project_id, session_id, run_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def save_run_bytes(
+        self,
+        project_id: str,
+        session_id: str,
+        run_id: str,
+        filename: str,
+        content: bytes,
+    ) -> tuple[Path, str]:
+        """Write bytes into a test run artifact directory and return `(path, relative_path)`."""
+        if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+            raise ValueError(f"Invalid artifact filename: {filename!r}")
+        directory = self.ensure_run_dir(project_id, session_id, run_id)
+        target = (directory / filename).resolve()
+        if not target.is_relative_to(self._base_dir):
+            raise ValueError("Computed artifact file path escapes base directory.")
+        target.write_bytes(content)
+        return target, self.to_relative_path(target)
+
     def save_session_bytes(
         self,
         project_id: str,
@@ -135,6 +163,15 @@ class ArtifactRepository:
                 ),
             )
         return record
+
+    def get(self, artifact_id: str) -> ArtifactRecord | None:
+        """Fetch a single artifact metadata record by ID."""
+        row = (
+            self._db.connect()
+            .execute("SELECT * FROM artifacts WHERE id = ?;", (artifact_id,))
+            .fetchone()
+        )
+        return self._row_to_record(row) if row is not None else None
 
     def list_by_session(self, session_id: str) -> list[ArtifactRecord]:
         """Return all artifact records associated with a recording session."""

@@ -183,6 +183,58 @@ CREATE INDEX IF NOT EXISTS idx_test_definitions_project
     ON test_definitions (project_id);
 """
 
+_MIGRATION_004_SQL = """
+CREATE TABLE IF NOT EXISTS test_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    passed_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    log_artifact_id TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (log_artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_test_runs_project_started
+    ON test_runs (project_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_test_runs_session_started
+    ON test_runs (session_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS test_results (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    definition_id TEXT,
+    function_name TEXT NOT NULL,
+    test_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    order_index INTEGER NOT NULL DEFAULT 1,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT NOT NULL DEFAULT '',
+    traceback TEXT NOT NULL DEFAULT '',
+    stdout TEXT NOT NULL DEFAULT '',
+    stderr TEXT NOT NULL DEFAULT '',
+    screenshot_artifact_id TEXT,
+    console_errors_json TEXT NOT NULL DEFAULT '[]',
+    network_errors_json TEXT NOT NULL DEFAULT '[]',
+    FOREIGN KEY (run_id) REFERENCES test_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (definition_id) REFERENCES test_definitions(id) ON DELETE SET NULL,
+    FOREIGN KEY (screenshot_artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_test_results_run_order
+    ON test_results (run_id, order_index);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -198,6 +250,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         name="test_definitions",
         sql=_MIGRATION_003_SQL,
+    ),
+    Migration(
+        version=4,
+        name="test_execution_runs_and_results",
+        sql=_MIGRATION_004_SQL,
     ),
 )
 
