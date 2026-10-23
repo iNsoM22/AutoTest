@@ -17,6 +17,32 @@ _SENSITIVE_KEY_PATTERN = re.compile(
 _SENSITIVE_INPUT_TYPES = frozenset({"password"})
 
 _BEARER_PATTERN = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+_API_KEY_PATTERN = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b"
+)
+_CARD_CANDIDATE_PATTERN = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
+
+
+def _passes_luhn(digits: str) -> bool:
+    if not (13 <= len(digits) <= 19) or not digits.isdigit():
+        return False
+    total = 0
+    reverse_digits = digits[::-1]
+    for idx, ch in enumerate(reverse_digits):
+        val = int(ch)
+        if idx % 2 == 1:
+            val *= 2
+            if val > 9:
+                val -= 9
+        total += val
+    return total % 10 == 0
+
+
+def _redact_card_match(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    digits = re.sub(r"[ -]", "", raw)
+    return REDACTED_VALUE if _passes_luhn(digits) else raw
 
 
 def is_sensitive_key(name: str) -> bool:
@@ -54,8 +80,12 @@ def redact_url(url: str) -> str:
 
 
 def redact_string(value: str) -> str:
-    """Mask inline Authorization-style tokens in free-form strings."""
-    return _BEARER_PATTERN.sub(rf"\1 {REDACTED_VALUE}", value)
+    """Mask inline tokens, JWTs, API keys, and Luhn-valid payment card numbers."""
+    masked = _BEARER_PATTERN.sub(rf"\1 {REDACTED_VALUE}", value)
+    masked = _JWT_PATTERN.sub(REDACTED_VALUE, masked)
+    masked = _API_KEY_PATTERN.sub(REDACTED_VALUE, masked)
+    masked = _CARD_CANDIDATE_PATTERN.sub(_redact_card_match, masked)
+    return masked
 
 
 def redact_target_and_payload(
@@ -69,12 +99,16 @@ def redact_target_and_payload(
     input_type = str(clean_target.get("input_type", "")).lower()
     target_name = str(clean_target.get("name", ""))
     target_id = str(clean_target.get("id", ""))
+    aria_label = str(clean_target.get("aria_label", ""))
+    placeholder = str(clean_target.get("placeholder", ""))
     autocomplete = str(clean_target.get("autocomplete", "")).lower()
 
     is_sensitive_target = (
         input_type in _SENSITIVE_INPUT_TYPES
         or is_sensitive_key(target_name)
         or is_sensitive_key(target_id)
+        or is_sensitive_key(aria_label)
+        or is_sensitive_key(placeholder)
         or "password" in autocomplete
         or "cc-" in autocomplete
     )

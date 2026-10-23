@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from src.definitions.models import TestDefinition, TestMode
@@ -269,3 +270,7 @@ class ExecutionService:
             return None
         path = self._artifacts.resolve_path(record.relative_path)
         return path if path.is_file() else None
+
+    def recover_interrupted_runs(self) -> int:
+        """Mark any leftover pending/running test runs as cancelled on startup."""
+        return self._execution_repo.mark_interrupted_runs(datetime.now(UTC))

@@ -129,6 +129,47 @@ class ExecutionRepository:
             cursor = conn.execute("DELETE FROM test_runs WHERE id = ?;", (run_id,))
         return cursor.rowcount > 0
 
+    def mark_interrupted_runs(self, ended_at: datetime) -> int:
+        """Mark leftover pending/running test runs as cancelled on startup recovery."""
+        ts = ended_at.isoformat()
+        with self._db.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE test_results
+                SET status = ?,
+                    error_message = CASE
+                        WHEN error_message = '' THEN 'Interrupted by unexpected shutdown.'
+                        ELSE error_message
+                    END
+                WHERE status IN (?, ?)
+                  AND run_id IN (
+                      SELECT id FROM test_runs WHERE status IN (?, ?)
+                  );
+                """,
+                (
+                    TestResultStatus.SKIPPED.value,
+                    TestResultStatus.PENDING.value,
+                    TestResultStatus.RUNNING.value,
+                    RunStatus.PENDING.value,
+                    RunStatus.RUNNING.value,
+                ),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE test_runs
+                SET status = ?,
+                    ended_at = COALESCE(ended_at, ?)
+                WHERE status IN (?, ?);
+                """,
+                (
+                    RunStatus.CANCELLED.value,
+                    ts,
+                    RunStatus.PENDING.value,
+                    RunStatus.RUNNING.value,
+                ),
+            )
+        return cursor.rowcount
+
     def create_results(self, results: Sequence[TestCaseResult]) -> list[TestCaseResult]:
         """Insert initial per-test result rows for a run in a single transaction."""
         rows = [

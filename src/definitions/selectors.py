@@ -8,9 +8,26 @@ from typing import Any
 from src.definitions.models import SelectorCandidate, SelectorStrategy
 
 _DYNAMIC_ID_RE = re.compile(
-    r"(?:^[0-9a-f]{8,}$|^[0-9]+$|^ember\d+$|^react-[a-z0-9-]+$|[:]\w+[:])",
+    r"(?:"
+    r"^[0-9a-f]{8,}$"
+    r"|^[0-9]+$"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|^ember\d+$"
+    r"|^react-[a-z0-9-]+$"
+    r"|^:r[0-9a-z]+:$"
+    r"|^mui-\d+$"
+    r"|^radix-[a-z0-9:-]+$"
+    r"|^headlessui-[a-z0-9:-]+$"
+    r"|^mat-(?:input|select|option|tab|mdc)-\d+$"
+    r"|^cdk-[a-z0-9-]+-\d+$"
+    r"|[_-][0-9a-f]{8,}$"
+    r"|[_-]\d{6,}$"
+    r"|[:]\w+[:]"
+    r")",
     re.IGNORECASE,
 )
+
+_SIMPLE_CSS_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 _TAG_TO_ROLE: dict[str, str] = {
     "button": "button",
@@ -22,6 +39,21 @@ _TAG_TO_ROLE: dict[str, str] = {
 
 def _css_attr_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _css_id_selector(element_id: str) -> str:
+    """Return `#id` for simple identifiers or `[id="..."]` when special chars are present."""
+    if _SIMPLE_CSS_IDENT_RE.match(element_id):
+        return f"#{element_id}"
+    return f'[id="{_css_attr_escape(element_id)}"]'
+
+
+def _css_path_confidence(css_path: str) -> float:
+    """Estimate stability of a fallback CSS path based on depth and nth-child fragility."""
+    depth = css_path.count(">") + 1
+    nth_count = css_path.lower().count(":nth-")
+    score = 0.60 - (0.04 * max(0, depth - 2)) - (0.08 * nth_count)
+    return round(max(0.20, min(0.60, score)), 2)
 
 
 def _looks_dynamic_id(element_id: str) -> bool:
@@ -126,7 +158,7 @@ def build_selector_candidates(
         _add(
             SelectorCandidate(
                 strategy=SelectorStrategy.CSS,
-                value=f"#{element_id}",
+                value=_css_id_selector(element_id),
                 confidence=0.80,
             )
         )
@@ -152,13 +184,33 @@ def build_selector_candidates(
             )
         )
 
+    alt_attr = str(target.get("alt", "")).strip()
+    if alt_attr:
+        _add(
+            SelectorCandidate(
+                strategy=SelectorStrategy.CSS,
+                value=f'img[alt="{_css_attr_escape(alt_attr)}"]',
+                confidence=0.68,
+            )
+        )
+
+    title_attr = str(target.get("title", "")).strip()
+    if title_attr:
+        _add(
+            SelectorCandidate(
+                strategy=SelectorStrategy.CSS,
+                value=f'[title="{_css_attr_escape(title_attr)}"]',
+                confidence=0.66,
+            )
+        )
+
     css_path = str(target.get("css_path", "")).strip()
     if css_path:
         _add(
             SelectorCandidate(
                 strategy=SelectorStrategy.CSS,
                 value=css_path,
-                confidence=0.55,
+                confidence=_css_path_confidence(css_path),
             )
         )
 

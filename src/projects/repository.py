@@ -258,6 +258,17 @@ class SessionRepository:
     def mark_interrupted_sessions(self, ended_at: datetime) -> int:
         ts = _format_dt(ended_at)
         with self._db.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE browser_pages
+                SET closed_at = COALESCE(closed_at, ?)
+                WHERE closed_at IS NULL
+                  AND session_id IN (
+                      SELECT id FROM recording_sessions WHERE status = ?
+                  );
+                """,
+                (ts, SessionStatus.ACTIVE.value),
+            )
             cursor = conn.execute(
                 """
                 UPDATE recording_sessions
