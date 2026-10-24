@@ -8,7 +8,12 @@ import sys
 from dataclasses import dataclass
 
 from src import __version__
-from src.config import AppSettings, configure_logging, get_settings
+from src.config import (
+    AppSettings,
+    configure_logging,
+    get_settings,
+    run_environment_diagnostics,
+)
 from src.definitions import TestDefinitionRepository, TestDefinitionService
 from src.execution import ExecutionRepository, ExecutionService
 from src.export import CopyExportService
@@ -99,6 +104,7 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         copy_service=copy_service,
     )
     session_service.recover_interrupted_sessions()
+    execution_service.recover_interrupted_runs()
 
     return AppContext(
         settings=active_settings,
@@ -123,12 +129,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Initialize configuration, SQLite database, and migrations, then exit without UI.",
     )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Verify runtime dependencies (Python, SQLite, PySide6, Pytest, Playwright Chromium).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI / desktop entry point."""
     args = _parse_args(argv)
+    if args.doctor:
+        settings = bootstrap()
+        report = run_environment_diagnostics(settings)
+        print(report.format_text())
+        return 0 if report.ok else 1
+
     context = create_app_context()
     try:
         if args.check:
