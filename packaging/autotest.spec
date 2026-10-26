@@ -12,7 +12,7 @@ PLAYWRIGHT_BROWSERS_PATH; see docs/PACKAGING.md for details.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
 ENTRY_SCRIPT = PROJECT_ROOT / "src" / "app.py"
@@ -20,10 +20,19 @@ ENTRY_SCRIPT = PROJECT_ROOT / "src" / "app.py"
 hiddenimports = (
     collect_submodules("src")
     + collect_submodules("playwright")
-    + ["pytest", "pytest_playwright", "platformdirs", "pydantic_settings"]
+    + collect_submodules("pytest")
+    + collect_submodules("_pytest")
+    + collect_submodules("pytest_playwright")
+    + ["pytest_base_url", "platformdirs", "pydantic_settings"]
 )
 
-datas = collect_data_files("playwright")
+datas = (
+    collect_data_files("playwright")
+    + [(str(PROJECT_ROOT / "src" / "recording" / "page_observer.js"), "src/recording")]
+    + copy_metadata("pytest")
+    + copy_metadata("pytest-playwright")
+    + copy_metadata("pytest-base-url")
+)
 
 a = Analysis(
     [str(ENTRY_SCRIPT)],

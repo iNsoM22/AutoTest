@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from src.definitions.models import (
@@ -37,6 +38,38 @@ def _locator_expr(page_var: str, selector: SelectorCandidate) -> str:
 
 def _uses_auth_fixture(definition: TestDefinition) -> bool:
     return any(p.fixture_name == "authenticated_page" for p in definition.prerequisites)
+
+
+_CTRL_MODIFIER_RE = re.compile(r"(?i)(?:^|(?<=\+))ctrl(?=\+)")
+
+
+def _normalize_playwright_key(key: str) -> str:
+    """Normalize shorthand modifier names (e.g. `Ctrl+a`) to W3C Playwright names (`Control+a`)."""
+    return _CTRL_MODIFIER_RE.sub("Control", key)
+
+
+def _find_auth_setup_definition(definitions: Sequence[TestDefinition]) -> TestDefinition | None:
+    """Find the preceding recorded authentication definition for `authenticated_page` setup."""
+    auth_consumers = [d for d in definitions if _uses_auth_fixture(d)]
+    if not auth_consumers:
+        return None
+    earliest_consumer_order = min(d.order_index for d in auth_consumers)
+    candidates = [
+        d
+        for d in definitions
+        if d.mode == TestMode.INDEPENDENT
+        and not _uses_auth_fixture(d)
+        and d.order_index < earliest_consumer_order
+        and d.actions
+    ]
+    if not candidates:
+        return None
+    auth_keywords = ("login", "log in", "sign in", "signin", "authenticate", "auth")
+    for cand in candidates:
+        text = f"{cand.name} {cand.description}".lower()
+        if any(kw in text for kw in auth_keywords) or any(a.is_redacted for a in cand.actions):
+            return cand
+    return None
 
 
 def _safe_doc_text(text: str) -> str:
@@ -175,6 +208,7 @@ class PytestPlaywrightGenerator:
         definitions: Sequence[TestDefinition],
         *,
         base_url: str = "",
+        shared_browser_context: bool = False,
     ) -> GeneratedFile:
         """Render a standalone `conftest.py` with viewport, base URL, and optional auth fixtures."""
         resolved_base = base_url or next(
@@ -184,6 +218,11 @@ class PytestPlaywrightGenerator:
         width = definitions[0].settings.viewport_width if definitions else 1280
         height = definitions[0].settings.viewport_height if definitions else 720
         needs_auth = any(_uses_auth_fixture(d) for d in definitions)
+        auth_setup_def = (
+            None if shared_browser_context else _find_auth_setup_definition(definitions)
+        )
+        needs_browser_import = shared_browser_context or (needs_auth and not shared_browser_context)
+        needs_page_import = shared_browser_context or needs_auth
 
         lines: list[str] = [
             '"""Shared Pytest + Playwright fixtures for generated end-to-end tests."""',
@@ -191,11 +230,21 @@ class PytestPlaywrightGenerator:
             "from __future__ import annotations",
             "",
             "import os",
-            "from typing import Any",
-            "",
-            "import pytest",
         ]
-        if needs_auth:
+        if needs_browser_import:
+            lines.append("from collections.abc import Generator")
+        if needs_auth and not shared_browser_context:
+            lines.append("from pathlib import Path")
+        lines.extend(
+            [
+                "from typing import Any",
+                "",
+                "import pytest",
+            ]
+        )
+        if needs_browser_import:
+            lines.append("from playwright.sync_api import Browser, Page")
+        elif needs_page_import:
             lines.append("from playwright.sync_api import Page")
 
         lines.extend(
@@ -218,22 +267,95 @@ class PytestPlaywrightGenerator:
             ]
         )
 
-        if needs_auth:
+        if shared_browser_context:
             lines.extend(
                 [
                     "",
                     "",
-                    "@pytest.fixture",
-                    "def authenticated_page(page: Page) -> Page:",
-                    '    """Provide an authenticated browser page for independent tests.',
+                    '@pytest.fixture(scope="session")',
+                    "def _shared_journey_page(",
+                    "    browser: Browser,",
+                    "    browser_context_args: dict[str, Any],",
+                    ") -> Generator[Page, None, None]:",
+                    '    """Share one browser context and page across sequential journey tests."""',
+                    "    context = browser.new_context(**browser_context_args)",
+                    "    shared_page = context.new_page()",
+                    "    try:",
+                    "        yield shared_page",
+                    "    finally:",
+                    "        context.close()",
                     "",
-                    "    Replace or extend this fixture with your project's login helper or",
-                    "    Playwright storage_state so independent tests do not rely on execution",
-                    "    order.",
-                    '    """',
-                    "    return page",
+                    "",
+                    "@pytest.fixture",
+                    "def page(_shared_journey_page: Page) -> Page:",
+                    '    """Provide the shared sequential journey page to each test."""',
+                    "    return _shared_journey_page",
                 ]
             )
+
+        if needs_auth:
+            if shared_browser_context:
+                lines.extend(
+                    [
+                        "",
+                        "",
+                        "@pytest.fixture",
+                        "def authenticated_page(page: Page) -> Page:",
+                        '    """Reuse the shared journey page after earlier auth steps."""',
+                        "    return page",
+                    ]
+                )
+            else:
+                if auth_setup_def is not None:
+                    lines.extend(
+                        [
+                            "",
+                            "",
+                            "def _perform_auth_setup(page: Page) -> None:",
+                            '    """Replay recorded authentication steps for independent tests."""',
+                        ]
+                    )
+                    starts_with_nav = bool(
+                        auth_setup_def.actions
+                        and auth_setup_def.actions[0].action_type == ProcessedActionType.NAVIGATE
+                    )
+                    for prereq in auth_setup_def.prerequisites:
+                        if prereq.setup_url and not starts_with_nav:
+                            lines.append(f"    page.goto({prereq.setup_url!r})")
+                    for action in auth_setup_def.actions:
+                        lines.extend(self._render_action(action, "page"))
+                lines.extend(
+                    [
+                        "",
+                        "",
+                        "@pytest.fixture",
+                        "def authenticated_page(",
+                        "    browser: Browser,",
+                        "    browser_context_args: dict[str, Any],",
+                        "    page: Page,",
+                        ") -> Generator[Page, None, None]:",
+                        '    """Provide an authenticated browser page for independent tests.',
+                        "",
+                        "    Set TEST_STORAGE_STATE to a Playwright storage_state JSON file",
+                        "    to reuse saved cookies/localStorage, or customize this fixture.",
+                        '    """',
+                        '    state_path = os.environ.get("TEST_STORAGE_STATE", "").strip()',
+                        "    if state_path and Path(state_path).is_file():",
+                        "        context = browser.new_context(",
+                        "            **browser_context_args,",
+                        "            storage_state=state_path,",
+                        "        )",
+                        "        auth_page = context.new_page()",
+                        "        try:",
+                        "            yield auth_page",
+                        "        finally:",
+                        "            context.close()",
+                        "        return",
+                    ]
+                )
+                if auth_setup_def is not None:
+                    lines.append("    _perform_auth_setup(page)")
+                lines.append("    yield page")
 
         lines.append("")
         return GeneratedFile(
@@ -263,6 +385,7 @@ class PytestPlaywrightGenerator:
         definitions: Sequence[TestDefinition],
         *,
         base_url: str = "",
+        shared_browser_context: bool = False,
     ) -> GeneratedSuite:
         """Generate a complete standalone suite (conftest, pytest.ini, and test modules)."""
         included = [d for d in definitions if d.included]
@@ -294,7 +417,11 @@ class PytestPlaywrightGenerator:
             )
 
         return GeneratedSuite(
-            conftest=self.render_conftest(included, base_url=base_url),
+            conftest=self.render_conftest(
+                included,
+                base_url=base_url,
+                shared_browser_context=shared_browser_context,
+            ),
             pytest_ini=self.render_pytest_ini(base_url=base_url),
             test_files=test_files,
         )
@@ -362,7 +489,8 @@ class PytestPlaywrightGenerator:
 
         if atype == ProcessedActionType.SUBMIT:
             if action.key:
-                lines.append(f"    {page_var}.keyboard.press({action.key!r})")
+                key = _normalize_playwright_key(action.key)
+                lines.append(f"    {page_var}.keyboard.press({key!r})")
             elif locator is not None:
                 lines.append(f"    {locator}.click()")
             else:
@@ -370,7 +498,7 @@ class PytestPlaywrightGenerator:
             return lines
 
         if atype == ProcessedActionType.PRESS_KEY:
-            key = action.key or "Enter"
+            key = _normalize_playwright_key(action.key or "Enter")
             if locator is not None:
                 lines.append(f"    {locator}.press({key!r})")
             else:

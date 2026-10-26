@@ -129,6 +129,16 @@ class TestDefinitionRepository:
             )
         return definition
 
+    def update_order_indices(self, ordered_ids: Sequence[str]) -> None:
+        """Update `order_index` values in-place without deleting rows (preserves FKs)."""
+        if not ordered_ids:
+            return
+        with self._db.transaction() as conn:
+            conn.executemany(
+                "UPDATE test_definitions SET order_index = ? WHERE id = ?;",
+                [(idx, def_id) for idx, def_id in enumerate(ordered_ids, start=1)],
+            )
+
     def delete(self, definition_id: str) -> bool:
         """Delete a single test definition by ID."""
         with self._db.transaction() as conn:

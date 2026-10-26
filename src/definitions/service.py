@@ -273,12 +273,11 @@ class TestDefinitionService:
         return self._definition_repo.update(updated)
 
     def delete_definition(self, definition_id: str) -> None:
-        """Delete a test definition and re-index remaining ones in the session."""
+        """Delete a test definition and re-index remaining ones in-place."""
         defn = self._require_definition(definition_id)
         self._definition_repo.delete(definition_id)
         remaining = self._definition_repo.list_by_session(defn.session_id)
-        reindexed = [d.model_copy(update={"order_index": i}) for i, d in enumerate(remaining, 1)]
-        self._definition_repo.replace_for_session(defn.session_id, reindexed)
+        self._definition_repo.update_order_indices([d.id for d in remaining])
 
     def _require_definition(self, definition_id: str) -> TestDefinition:
         defn = self._definition_repo.get(definition_id)

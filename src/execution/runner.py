@@ -17,6 +17,7 @@ from typing import Any
 
 from src.definitions.models import TestDefinition
 from src.execution.models import (
+    ExecutionMode,
     ExecutionProgressEvent,
     RunStatus,
     TestCaseResult,
@@ -72,6 +73,7 @@ def _autotest_page_observer(request: pytest.FixtureRequest):
             except Exception:
                 page = None
 
+    listeners: list[tuple[str, Any]] = []
     if page is not None:
         def _on_console(msg: Any) -> None:
             try:
@@ -97,15 +99,26 @@ def _autotest_page_observer(request: pytest.FixtureRequest):
             except Exception:
                 pass
 
-        try:
-            page.on("console", _on_console)
-            page.on("pageerror", _on_pageerror)
-            page.on("response", _on_response)
-            page.on("requestfailed", _on_requestfailed)
-        except Exception:
-            pass
+        for ev_name, handler in (
+            ("console", _on_console),
+            ("pageerror", _on_pageerror),
+            ("response", _on_response),
+            ("requestfailed", _on_requestfailed),
+        ):
+            try:
+                page.on(ev_name, handler)
+                listeners.append((ev_name, handler))
+            except Exception:
+                pass
 
     yield
+
+    if page is not None and listeners:
+        for ev_name, handler in listeners:
+            try:
+                page.remove_listener(ev_name, handler)
+            except Exception:
+                pass
 
     screenshot_path = ""
     failed = bool(getattr(request.node, "_autotest_failed", False))
@@ -234,7 +247,14 @@ class ExecutionRunner:
         self._artifacts = artifacts
         self._artifact_repo = artifact_repository
         self._copy_service = copy_service or CopyExportService()
+        self._custom_python = python_executable is not None
         self._python_executable = python_executable or sys.executable
+
+    def _build_pytest_command(self, pytest_args: Sequence[str]) -> list[str]:
+        """Build the subprocess command for Pytest (supports frozen PyInstaller binaries)."""
+        if not self._custom_python and getattr(sys, "frozen", False):
+            return [self._python_executable, "--run-pytest", *pytest_args]
+        return [self._python_executable, "-m", "pytest", *pytest_args]
 
     def execute(
         self,
@@ -252,7 +272,13 @@ class ExecutionRunner:
         run_dir = self._artifacts.ensure_run_dir(run.project_id, run.session_id, run.id)
         suite_dir = run_dir / "suite"
         screenshots_dir = run_dir / "screenshots"
-        self._copy_service.export_suite_to_dir(definitions, suite_dir, base_url=base_url)
+        shared_context = run.mode == ExecutionMode.JOURNEY and len(definitions) > 1
+        self._copy_service.export_suite_to_dir(
+            definitions,
+            suite_dir,
+            base_url=base_url,
+            shared_browser_context=shared_context,
+        )
 
         plugin_path = run_dir / "_autotest_runner_plugin.py"
         plugin_path.write_text(_RUNNER_PLUGIN_SOURCE, encoding="utf-8")
@@ -260,10 +286,7 @@ class ExecutionRunner:
         results_by_func: dict[str, TestCaseResult] = {r.function_name: r for r in results}
         result_list = list(results)
 
-        cmd = [
-            self._python_executable,
-            "-m",
-            "pytest",
+        pytest_args = [
             "-c",
             str(suite_dir / "pytest.ini"),
             "--rootdir",
@@ -275,7 +298,8 @@ class ExecutionRunner:
             str(suite_dir),
         ]
         if headed:
-            cmd.append("--headed")
+            pytest_args.append("--headed")
+        cmd = self._build_pytest_command(pytest_args)
 
         env = os.environ.copy()
         existing_pypath = env.get("PYTHONPATH", "")

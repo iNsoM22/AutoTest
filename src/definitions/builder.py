@@ -31,6 +31,12 @@ from src.scenarios.models import Scenario
 
 _AUTH_KEYWORDS = ("login", "log in", "sign in", "signin", "authenticate", "auth")
 _REDACTED_MARKER = "[REDACTED]"
+_MODIFIER_KEY_MAP = {
+    "ctrl": "Control",
+    "alt": "Alt",
+    "shift": "Shift",
+    "meta": "Meta",
+}
 
 
 def _dedupe_preserve(items: Sequence[str]) -> list[str]:
@@ -263,7 +269,9 @@ class TestDefinitionBuilder:
         elif event.action_type == ProcessedActionType.PRESS_KEY:
             raw_key = str(event.payload.get("key", ""))
             mods = [
-                m.capitalize() for m in ("ctrl", "alt", "shift", "meta") if event.payload.get(m)
+                _MODIFIER_KEY_MAP[m]
+                for m in ("ctrl", "alt", "shift", "meta")
+                if event.payload.get(m)
             ]
             key = "+".join([*mods, raw_key]) if mods and raw_key else raw_key
         elif event.action_type == ProcessedActionType.SUBMIT:

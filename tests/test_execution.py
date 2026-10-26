@@ -345,3 +345,203 @@ def test_pre_cancelled_execution_marks_cancelled(tmp_settings: AppSettings) -> N
         assert run.status == RunStatus.CANCELLED
     finally:
         db.close_all()
+
+
+def test_delete_definition_preserves_other_test_result_fk_links(
+    tmp_settings: AppSettings,
+) -> None:
+    from src.app import create_app_context
+
+    ctx = create_app_context(tmp_settings)
+    try:
+        project = ctx.project_service.create_project(ProjectCreate(name="FKPreserveApp"))
+        session = ctx.session_service.create_session(project.id, name="S1")
+
+        def1 = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="First Test",
+            function_name="test_first",
+            mode=TestMode.INDEPENDENT,
+            order_index=1,
+        )
+        def2 = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Second Test",
+            function_name="test_second",
+            mode=TestMode.INDEPENDENT,
+            order_index=2,
+        )
+        ctx.definition_service._definition_repo.replace_for_session(session.id, [def1, def2])
+
+        run = TestRun(
+            project_id=project.id,
+            session_id=session.id,
+            mode=ExecutionMode.INDEPENDENT,
+            status=RunStatus.FAILED,
+            total_count=2,
+            failed_count=2,
+        )
+        ctx.execution_service._execution_repo.create_run(run)
+        ctx.execution_service._execution_repo.create_results(
+            [
+                TestCaseResult(
+                    run_id=run.id,
+                    definition_id=def1.id,
+                    function_name=def1.function_name,
+                    test_name=def1.name,
+                    status=TestResultStatus.FAILED,
+                    order_index=1,
+                ),
+                TestCaseResult(
+                    run_id=run.id,
+                    definition_id=def2.id,
+                    function_name=def2.function_name,
+                    test_name=def2.name,
+                    status=TestResultStatus.FAILED,
+                    order_index=2,
+                ),
+            ]
+        )
+
+        # Deleting def1 must NOT nullify def2's historical test_results.definition_id
+        ctx.definition_service.delete_definition(def1.id)
+
+        remaining = ctx.definition_service.list_by_session(session.id)
+        assert [d.id for d in remaining] == [def2.id]
+        assert remaining[0].order_index == 1
+
+        results = ctx.execution_service._execution_repo.list_results_by_run(run.id)
+        by_func = {r.function_name: r for r in results}
+        assert by_func["test_first"].definition_id is None
+        assert by_func["test_second"].definition_id == def2.id
+    finally:
+        ctx.close()
+
+
+@pytest.mark.browser
+def test_journey_fallback_shares_state_and_authenticated_page_replays_auth(
+    tmp_settings: AppSettings,
+    tmp_path: Path,
+) -> None:
+    html_file = tmp_path / "auth_session_fixture.html"
+    html_file.write_text(
+        """<!doctype html>
+<html>
+  <head><title>Auth Session Fixture</title></head>
+  <body>
+    <button
+      data-testid="login-btn"
+      onclick="window.sessionStorage.setItem('auth_user', 'alice');
+               document.getElementById('status').textContent = 'Logged in as alice';"
+    >
+      Sign In
+    </button>
+    <button
+      data-testid="check-btn"
+      onclick="const u = window.sessionStorage.getItem('auth_user') || 'anonymous';
+               document.getElementById('session-out').textContent = 'Session: ' + u;"
+    >
+      Check Session
+    </button>
+    <div id="status">Signed out</div>
+    <div id="session-out">Unknown</div>
+  </body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    page_url = html_file.as_uri()
+
+    db, project_service, session_service, def_repo, _exec_repo, exec_service, _artifacts = (
+        _setup_execution_stack(tmp_settings)
+    )
+    try:
+        project = project_service.create_project(
+            ProjectCreate(name="JourneyAuthApp", base_url=page_url)
+        )
+        session = session_service.create_session(project.id, name="AuthSession", start_url=page_url)
+
+        login_def = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Login Flow",
+            function_name="test_login_flow",
+            mode=TestMode.INDEPENDENT,
+            order_index=1,
+            prerequisites=[
+                TestPrerequisite(name="entry_url", description="Open app", setup_url=page_url)
+            ],
+            actions=[
+                TestAction(
+                    order_index=1,
+                    action_type=ProcessedActionType.CLICK,
+                    summary="Click Sign In",
+                    selector=SelectorCandidate(
+                        strategy=SelectorStrategy.TEST_ID, value="login-btn"
+                    ),
+                ),
+            ],
+            assertions=[
+                TestAssertion(
+                    order_index=1,
+                    assertion_type=AssertionType.TEXT_VISIBLE,
+                    expected="Logged in as alice",
+                    description="User is logged in",
+                ),
+            ],
+            settings=TestExecutionSettings(timeout_ms=5000),
+        )
+
+        protected_def = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Protected Action",
+            function_name="test_protected_action",
+            mode=TestMode.INDEPENDENT,
+            order_index=2,
+            prerequisites=[
+                TestPrerequisite(
+                    name="authenticated_session",
+                    description="Requires authenticated state",
+                    fixture_name="authenticated_page",
+                )
+            ],
+            actions=[
+                TestAction(
+                    order_index=1,
+                    action_type=ProcessedActionType.CLICK,
+                    summary="Click Check Session",
+                    selector=SelectorCandidate(
+                        strategy=SelectorStrategy.TEST_ID, value="check-btn"
+                    ),
+                ),
+            ],
+            assertions=[
+                TestAssertion(
+                    order_index=1,
+                    assertion_type=AssertionType.TEXT_VISIBLE,
+                    expected="Session: alice",
+                    description="Session state preserved",
+                ),
+            ],
+            settings=TestExecutionSettings(timeout_ms=5000),
+        )
+
+        # Only INDEPENDENT defs saved (no TestMode.JOURNEY) to test both modes
+        def_repo.replace_for_session(session.id, [login_def, protected_def])
+
+        # 1. Journey fallback runs both tests sequentially on one shared browser context/page
+        j_run, j_results = exec_service.run_journey(session.id)
+        assert j_run.mode == ExecutionMode.JOURNEY
+        assert j_run.status == RunStatus.PASSED
+        assert [r.status for r in j_results] == [TestResultStatus.PASSED, TestResultStatus.PASSED]
+
+        # 2. Independent mode uses authenticated_page fixture to replay login before protected test
+        i_run, i_results = exec_service.run_independent(session.id)
+        assert i_run.mode == ExecutionMode.INDEPENDENT
+        assert i_run.status == RunStatus.PASSED
+        assert [r.status for r in i_results] == [TestResultStatus.PASSED, TestResultStatus.PASSED]
+    finally:
+        db.close_all()

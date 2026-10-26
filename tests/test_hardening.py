@@ -270,3 +270,115 @@ def test_environment_diagnostics_report(tmp_settings: AppSettings) -> None:
     assert "Status: READY" in text
     assert "[PASS] Python Runtime" in text
     assert "[PASS] SQLite Engine" in text
+
+
+def test_frozen_pytest_dispatch_and_pyinstaller_spec(
+    tmp_settings: AppSettings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from src.execution.runner import ExecutionRunner
+    from src.storage import ArtifactManager, ArtifactRepository, Database
+
+    db = Database(tmp_settings.db_path)
+    db.initialize()
+    try:
+        runner = ExecutionRunner(
+            ArtifactManager(tmp_settings.artifacts_dir), ArtifactRepository(db)
+        )
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        assert runner._build_pytest_command(["-q"]) == [sys.executable, "-m", "pytest", "-q"]
+
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        assert runner._build_pytest_command(["-q"]) == [sys.executable, "--run-pytest", "-q"]
+    finally:
+        db.close_all()
+
+    # Verify --run-pytest executes a real pytest test file cleanly in a subprocess
+    tiny_test = tmp_path / "test_embedded_ok.py"
+    tiny_test.write_text("def test_ok() -> None:\n    assert 1 + 1 == 2\n", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "src.app", "--run-pytest", str(tiny_test), "-q", "--no-header"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    # Verify PyInstaller spec bundles page_observer.js and pytest plugin metadata
+    spec_path = Path(__file__).resolve().parent.parent / "packaging" / "autotest.spec"
+    spec_text = spec_path.read_text(encoding="utf-8")
+    assert "page_observer.js" in spec_text
+    assert 'copy_metadata("pytest-playwright")' in spec_text
+    assert 'copy_metadata("pytest-base-url")' in spec_text
+    assert 'collect_submodules("pytest_playwright")' in spec_text
+
+
+def test_ctrl_modifier_shortcut_maps_to_playwright_control() -> None:
+    from src.definitions.models import (
+        SelectorCandidate,
+        SelectorStrategy,
+        TestAction,
+        TestDefinition,
+        TestMode,
+    )
+    from src.processing.models import ProcessedActionType, ProcessedEvent
+    from src.scenarios.models import Scenario
+
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    ev = ProcessedEvent(
+        project_id="proj-1",
+        session_id="sess-1",
+        order_index=1,
+        action_type=ProcessedActionType.PRESS_KEY,
+        started_at=now,
+        ended_at=now,
+        target={"tag": "input", "test_id": "editor"},
+        payload={"key": "a", "ctrl": True, "shift": True},
+        summary="Press Ctrl+Shift+a",
+        raw_event_ids=["raw-1"],
+    )
+    scenario = Scenario(
+        project_id="proj-1",
+        session_id="sess-1",
+        name="Shortcut Scenario",
+        order_index=1,
+        processed_event_ids=[ev.id],
+    )
+    defs = TestDefinitionBuilder().build(
+        project_id="proj-1",
+        session_id="sess-1",
+        scenarios=[scenario],
+        timeline=[ev],
+        include_journey=False,
+    )
+    assert defs[0].actions[0].key == "Control+Shift+a"
+
+    gen = PytestPlaywrightGenerator()
+    code = gen.render_test_module(defs)
+    assert ".press('Control+Shift+a')" in code
+
+    # Manually edited shorthand "Ctrl+Enter" is also normalized during codegen
+    manual_def = TestDefinition(
+        project_id="proj-1",
+        session_id="sess-1",
+        name="Manual Shortcut",
+        function_name="test_manual_shortcut",
+        mode=TestMode.INDEPENDENT,
+        order_index=1,
+        actions=[
+            TestAction(
+                order_index=1,
+                action_type=ProcessedActionType.PRESS_KEY,
+                summary="Press Ctrl+Enter",
+                selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="editor"),
+                key="Ctrl+Enter",
+            )
+        ],
+    )
+    manual_code = gen.render_test_module([manual_def])
+    assert ".press('Control+Enter')" in manual_code

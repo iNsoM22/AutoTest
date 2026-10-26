@@ -195,7 +195,9 @@ def test_generated_suite_is_valid_standalone_python_with_zero_autotest_imports()
     assert "[REDACTED]" not in scenarios_code
     assert "def test_sync_data(authenticated_page: Page) -> None:" in scenarios_code
     assert "REVIEW [inferred] (disabled):" in scenarios_code
-    assert "def authenticated_page(page: Page) -> Page:" in suite.conftest.content
+    assert "def authenticated_page(" in suite.conftest.content
+    assert "TEST_STORAGE_STATE" in suite.conftest.content
+    assert "def _perform_auth_setup(page: Page) -> None:" in suite.conftest.content
 
 
 def test_copy_export_service_supports_all_copy_modes_and_disk_export(tmp_path: Path) -> None:

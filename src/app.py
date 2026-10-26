@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from dataclasses import dataclass
 
@@ -137,10 +138,42 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _attach_parent_console_if_frozen() -> None:
+    """Attach to parent console on Windows when running CLI flags from a GUI-frozen binary."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    try:
+        import ctypes
+
+        if ctypes.windll.kernel32.AttachConsole(-1):
+            if sys.stdout is None:
+                sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
+            if sys.stderr is None:
+                sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
+    except Exception:
+        pass
+
+
+def _run_embedded_pytest(pytest_args: list[str]) -> int:
+    """Execute Pytest directly inside a frozen executable subprocess."""
+    extra_pypath = os.environ.get("PYTHONPATH", "")
+    for entry in reversed(extra_pypath.split(os.pathsep)):
+        if entry and entry not in sys.path:
+            sys.path.insert(0, entry)
+    import pytest
+
+    return int(pytest.main(pytest_args))
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI / desktop entry point."""
-    args = _parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "--run-pytest":
+        return _run_embedded_pytest(raw_argv[1:])
+
+    args = _parse_args(raw_argv)
     if args.doctor:
+        _attach_parent_console_if_frozen()
         settings = bootstrap()
         report = run_environment_diagnostics(settings)
         print(report.format_text())
@@ -149,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     context = create_app_context()
     try:
         if args.check:
+            _attach_parent_console_if_frozen()
             logger.info("Health check succeeded (db=%s).", context.settings.db_path)
             return 0
 
@@ -175,3 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(app.exec())
     finally:
         context.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
