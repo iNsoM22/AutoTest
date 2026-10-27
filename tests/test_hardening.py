@@ -382,3 +382,167 @@ def test_ctrl_modifier_shortcut_maps_to_playwright_control() -> None:
     )
     manual_code = gen.render_test_module([manual_def])
     assert ".press('Control+Enter')" in manual_code
+
+
+def test_redaction_avoids_common_word_false_positives_and_syncs_js() -> None:
+    from pathlib import Path
+
+    from src.recording.redaction import is_sensitive_key
+
+    # Benign words containing pin/auth/otp substrings must NOT be falsely redacted
+    for benign in ("shipping_address", "author", "desktop_mode", "opinion", "hotspot", "mapping"):
+        assert not is_sensitive_key(benign), f"False positive on {benign}"
+        _, payload = redact_target_and_payload(
+            {"tag": "input", "name": benign, "placeholder": f"Enter {benign}"},
+            {"value": "hello-world"},
+        )
+        assert payload["value"] == "hello-world"
+        assert not payload.get("redacted")
+
+    # Actual secret field names must still be redacted
+    for secret in ("user_pin", "pin-code", "otp_code", "card_cvv", "x-auth", "user_pwd", "ssn"):
+        assert is_sensitive_key(secret), f"Missed secret key {secret}"
+
+    # Verify JS page_observer aligns with aria-label/placeholder and matched test-id attributes
+    js_path = Path(__file__).resolve().parent.parent / "src" / "recording" / "page_observer.js"
+    js_text = js_path.read_text(encoding="utf-8")
+    assert 'el.getAttribute("aria-label")' in js_text
+    assert 'el.getAttribute("placeholder")' in js_text
+    assert "matchedTestAttr" in js_text
+    assert "test_id_attr" in js_text
+
+
+def test_aria_roles_test_id_attrs_standalone_submit_and_multiline_comments() -> None:
+    import ast
+
+    from src.definitions.models import (
+        AssertionType,
+        SelectorCandidate,
+        SelectorStrategy,
+        TestAction,
+        TestAssertion,
+        TestDefinition,
+        TestMode,
+        TestPrerequisite,
+    )
+    from src.processing.models import ProcessedActionType, ProcessedEvent
+    from src.scenarios.models import Scenario
+
+    # 1. ARIA roles for password / search / number
+    pw_primary, _ = build_selector_candidates(
+        {"tag": "input", "input_type": "password", "aria_label": "Password"}
+    )
+    assert pw_primary is not None
+    assert pw_primary.strategy == SelectorStrategy.LABEL  # NOT role=textbox
+
+    search_primary, _ = build_selector_candidates(
+        {"tag": "input", "input_type": "search", "aria_label": "Find items"}
+    )
+    assert search_primary is not None
+    assert search_primary.strategy == SelectorStrategy.ROLE
+    assert search_primary.role == "searchbox"
+
+    num_primary, _ = build_selector_candidates(
+        {"tag": "input", "input_type": "number", "aria_label": "Quantity"}
+    )
+    assert num_primary is not None
+    assert num_primary.strategy == SelectorStrategy.ROLE
+    assert num_primary.role == "spinbutton"
+
+    # 2. data-test-id and data-cy generate CSS attribute selectors instead of get_by_test_id
+    cy_primary, _ = build_selector_candidates(
+        {"tag": "button", "test_id": "checkout-btn", "test_id_attr": "data-cy"}
+    )
+    assert cy_primary is not None
+    assert cy_primary.strategy == SelectorStrategy.CSS
+    assert cy_primary.value == '[data-cy="checkout-btn"]'
+
+    dt_primary, _ = build_selector_candidates(
+        {"tag": "button", "test_id": "save-btn", "test_id_attr": "data-test-id"}
+    )
+    assert dt_primary is not None
+    assert dt_primary.strategy == SelectorStrategy.CSS
+    assert dt_primary.value == '[data-test-id="save-btn"]'
+
+    # 3. Standalone <form> SUBMIT uses requestSubmit() instead of form.click()
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    submit_ev = ProcessedEvent(
+        project_id="proj-1",
+        session_id="sess-1",
+        order_index=1,
+        action_type=ProcessedActionType.SUBMIT,
+        started_at=now,
+        ended_at=now,
+        target={"tag": "form", "id": "login-form"},
+        payload={},
+        summary="Submit login form\nline two",
+        raw_event_ids=["r1"],
+    )
+    scenario = Scenario(
+        project_id="proj-1",
+        session_id="sess-1",
+        name="Form Submit",
+        order_index=1,
+        processed_event_ids=[submit_ev.id],
+    )
+    defs = TestDefinitionBuilder().build(
+        project_id="proj-1",
+        session_id="sess-1",
+        scenarios=[scenario],
+        timeline=[submit_ev],
+        include_journey=False,
+    )
+    assert defs[0].actions[0].via_form_submit is True
+    gen = PytestPlaywrightGenerator()
+    submit_code = gen.render_test_module(defs)
+    ast.parse(submit_code)
+    assert ".evaluate('form => form.requestSubmit()')" in submit_code
+    assert ".click()" not in submit_code
+
+    # 4. Multiline comments never cause SyntaxError
+    multiline_def = TestDefinition(
+        project_id="proj-1",
+        session_id="sess-1",
+        name="Multiline Comments",
+        function_name="test_multiline_comments",
+        mode=TestMode.INDEPENDENT,
+        order_index=1,
+        prerequisites=[
+            TestPrerequisite(
+                name="entry_url",
+                description="Line 1\nLine 2\r\nLine 3",
+                setup_url="https://example.com",
+            )
+        ],
+        actions=[
+            TestAction(
+                order_index=1,
+                action_type=ProcessedActionType.SCROLL,
+                summary="Scroll down\nwith newline",
+            ),
+            TestAction(
+                order_index=2,
+                action_type=ProcessedActionType.CLICK,
+                summary="Click\nmissing selector",
+                selector=None,
+            ),
+        ],
+        assertions=[
+            TestAssertion(
+                order_index=1,
+                assertion_type=AssertionType.TEXT_VISIBLE,
+                description="Verify heading\nacross lines",
+                expected="Welcome",
+                selector=SelectorCandidate(strategy=SelectorStrategy.CSS, value="h1"),
+            ),
+            TestAssertion(
+                order_index=2,
+                assertion_type=AssertionType.NETWORK_RESPONSE,
+                description="Network\ncheck",
+                expected="200\n/api/save",
+                enabled=True,
+            ),
+        ],
+    )
+    multiline_code = gen.render_test_module([multiline_def])
+    ast.parse(multiline_code)

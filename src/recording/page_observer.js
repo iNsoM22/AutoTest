@@ -3,7 +3,7 @@
   window.__autotestObserverInstalled = true;
 
   const SENSITIVE_RE =
-    /(password|passwd|pwd|secret|token|api[_-]?key|auth|credit[_-]?card|card[_-]?number|cvv|cvc|ssn|pin|otp)/i;
+    /(password|passwd|secret|token|api[_-]?key|authorization|cookie|session[_-]?id|credit[_-]?card|card[_-]?number|private[_-]?key|(?:^|[^a-z0-9])(?:pwd|auth|cvv|cvc|ssn|pin|otp)(?:$|[^a-z0-9]))/i;
   const MEANINGFUL_KEYS = new Set([
     "Enter",
     "Escape",
@@ -43,7 +43,14 @@
     if (autocomplete.includes("password") || autocomplete.includes("cc-")) return true;
     const name = el.getAttribute("name") || "";
     const id = el.getAttribute("id") || "";
-    return SENSITIVE_RE.test(name) || SENSITIVE_RE.test(id);
+    const ariaLabel = el.getAttribute("aria-label") || "";
+    const placeholder = el.getAttribute("placeholder") || "";
+    return (
+      SENSITIVE_RE.test(name) ||
+      SENSITIVE_RE.test(id) ||
+      SENSITIVE_RE.test(ariaLabel) ||
+      SENSITIVE_RE.test(placeholder)
+    );
   }
 
   function cleanText(raw, maxLen = 120) {
@@ -62,12 +69,18 @@
         parts.unshift(`#${CSS.escape(current.id)}`);
         break;
       }
-      const testId =
-        current.getAttribute("data-testid") ||
-        current.getAttribute("data-test-id") ||
-        current.getAttribute("data-cy");
-      if (testId) {
-        parts.unshift(`${tag}[data-testid="${testId.replace(/"/g, '\\"')}"]`);
+      let matchedTestAttr = "";
+      let matchedTestId = "";
+      for (const attr of ["data-testid", "data-test-id", "data-cy"]) {
+        const val = current.getAttribute(attr);
+        if (val) {
+          matchedTestAttr = attr;
+          matchedTestId = val;
+          break;
+        }
+      }
+      if (matchedTestId) {
+        parts.unshift(`${tag}[${matchedTestAttr}="${matchedTestId.replace(/"/g, '\\"')}"]`);
         break;
       }
       let selector = tag;
@@ -106,6 +119,16 @@
       tag,
       css_path: buildCssPath(el),
     };
+    let testIdAttr = "";
+    let testIdVal = "";
+    for (const attr of ["data-testid", "data-test-id", "data-cy"]) {
+      const val = el.getAttribute(attr);
+      if (val) {
+        testIdAttr = attr;
+        testIdVal = val;
+        break;
+      }
+    }
     const attrs = {
       id: el.id || "",
       name: el.getAttribute("name") || "",
@@ -114,11 +137,8 @@
       placeholder: el.getAttribute("placeholder") || "",
       input_type: el.getAttribute("type") || "",
       autocomplete: el.getAttribute("autocomplete") || "",
-      test_id:
-        el.getAttribute("data-testid") ||
-        el.getAttribute("data-test-id") ||
-        el.getAttribute("data-cy") ||
-        "",
+      test_id: testIdVal,
+      test_id_attr: testIdAttr,
       href: el.getAttribute("href") || "",
     };
     for (const [k, v] of Object.entries(attrs)) {

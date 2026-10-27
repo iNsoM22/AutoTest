@@ -545,3 +545,103 @@ def test_journey_fallback_shares_state_and_authenticated_page_replays_auth(
         assert [r.status for r in i_results] == [TestResultStatus.PASSED, TestResultStatus.PASSED]
     finally:
         db.close_all()
+
+
+def test_excluded_definition_and_empty_function_name_execute_cleanly(
+    tmp_settings: AppSettings,
+) -> None:
+    db, project_service, session_service, def_repo, _exec_repo, exec_service, _artifacts = (
+        _setup_execution_stack(tmp_settings)
+    )
+    try:
+        project = project_service.create_project(ProjectCreate(name="ExcludedApp"))
+        session = session_service.create_session(project.id, name="ExcludedSession")
+        defn = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Excluded Empty Func",
+            function_name="",
+            mode=TestMode.INDEPENDENT,
+            order_index=1,
+            included=False,
+            actions=[],
+            assertions=[],
+        )
+        def_repo.replace_for_session(session.id, [defn])
+
+        run, results = exec_service.run_single_test(defn.id)
+        assert run.status == RunStatus.PASSED
+        assert len(results) == 1
+        assert results[0].status == TestResultStatus.PASSED
+        assert results[0].function_name == "test_excluded_empty_func"
+    finally:
+        db.close_all()
+
+
+def test_runner_plugin_captures_stdout_stderr_and_teardown_errors(tmp_path: Path) -> None:
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from src.execution.runner import _EVENT_PREFIX, _RUNNER_PLUGIN_SOURCE
+
+    plugin_path = tmp_path / "_autotest_runner_plugin.py"
+    plugin_path.write_text(_RUNNER_PLUGIN_SOURCE, encoding="utf-8")
+
+    test_file = tmp_path / "test_plugin_capture.py"
+    test_file.write_text(
+        """import sys
+import pytest
+
+@pytest.fixture
+def broken_teardown():
+    yield
+    raise RuntimeError("teardown boom")
+
+def test_with_output() -> None:
+    print("hello-captured-stdout")
+    print("hello-captured-stderr", file=sys.stderr)
+
+def test_teardown_failure(broken_teardown) -> None:
+    assert True
+""",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{tmp_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "_autotest_runner_plugin",
+            "--capture=sys",
+            "--tb=short",
+            str(test_file),
+        ],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    events: dict[str, dict[str, object]] = {}
+    for line in proc.stdout.splitlines():
+        if _EVENT_PREFIX in line:
+            _, payload = line.split(_EVENT_PREFIX, 1)
+            data = json.loads(payload)
+            if data.get("type") == "test_finished":
+                events[str(data["function_name"])] = data
+
+    assert "test_with_output" in events
+    assert events["test_with_output"]["status"] == "passed"
+    assert "hello-captured-stdout" in str(events["test_with_output"]["stdout"])
+    assert "hello-captured-stderr" in str(events["test_with_output"]["stderr"])
+
+    assert "test_teardown_failure" in events
+    assert events["test_teardown_failure"]["status"] == "error"
+    assert "teardown boom" in str(events["test_teardown_failure"]["traceback"])

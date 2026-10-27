@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -38,6 +38,9 @@ from src.ui.workers import TestExecutionWorker
 class ExecutionWidget(QWidget):
     """Desktop workspace tab for running tests, viewing live output, and inspecting history."""
 
+    execution_started = Signal()
+    execution_finished = Signal()
+
     def __init__(
         self,
         execution_service: ExecutionService,
@@ -56,9 +59,16 @@ class ExecutionWidget(QWidget):
         self._current_results: list[TestCaseResult] = []
         self._results_by_func: dict[str, TestCaseResult] = {}
         self._worker: TestExecutionWorker | None = None
+        self._active_run_session_id: str | None = None
+        self._active_run_id: str | None = None
 
         self._build_ui()
         self._update_controls()
+
+    @property
+    def is_running(self) -> bool:
+        """Return True while a background test execution worker is active."""
+        return self._worker is not None
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -209,6 +219,8 @@ class ExecutionWidget(QWidget):
 
     def load_session(self, session_id: str | None, session_name: str = "") -> None:
         """Bind this tab to a recording session and load its definitions and run history."""
+        if self.is_running and session_id != self._active_run_session_id:
+            return
         self._session_id = session_id
         self._session_name = session_name
         self._current_run = None
@@ -316,7 +328,10 @@ class ExecutionWidget(QWidget):
         worker.run_completed.connect(self._on_run_completed)
         worker.run_failed.connect(self._on_run_failed)
         self._worker = worker
+        self._active_run_session_id = self._session_id
+        self._active_run_id = None
         self._update_controls()
+        self.execution_started.emit()
         worker.start()
 
     def _on_run_selected(self) -> None:
@@ -351,13 +366,16 @@ class ExecutionWidget(QWidget):
             self._worker.request_cancel()
 
     def _on_progress_event(self, event_obj: object) -> None:
-        if not isinstance(event_obj, ExecutionProgressEvent):
+        if self._worker is None or not isinstance(event_obj, ExecutionProgressEvent):
+            return
+        if event_obj.event_type == "run_started":
+            self._active_run_id = event_obj.run_id
+            self.summary_label.setText(event_obj.message)
+            return
+        if self._active_run_id is not None and event_obj.run_id != self._active_run_id:
             return
         if event_obj.event_type == "log":
             self.live_log_view.appendPlainText(event_obj.message)
-            return
-        if event_obj.event_type == "run_started":
-            self.summary_label.setText(event_obj.message)
             return
         if event_obj.event_type in ("test_started", "test_finished") and event_obj.result:
             self._upsert_result_row(event_obj.result)
@@ -367,7 +385,11 @@ class ExecutionWidget(QWidget):
 
     def _on_run_completed(self, run_obj: object, results_obj: object) -> None:
         self._cleanup_worker()
-        if isinstance(run_obj, TestRun) and isinstance(results_obj, list):
+        if (
+            isinstance(run_obj, TestRun)
+            and isinstance(results_obj, list)
+            and run_obj.session_id == self._session_id
+        ):
             self._current_run = run_obj
             self._current_results = [r for r in results_obj if isinstance(r, TestCaseResult)]
             self._render_results_table(self._current_results)
@@ -390,9 +412,12 @@ class ExecutionWidget(QWidget):
     def _cleanup_worker(self) -> None:
         worker = self._worker
         self._worker = None
+        self._active_run_session_id = None
+        self._active_run_id = None
         if worker is not None:
             worker.wait(3000)
             worker.deleteLater()
+            self.execution_finished.emit()
 
     def _on_history_selected(self, row: int) -> None:
         if row < 0 or row >= len(self._runs) or self._worker is not None:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -42,16 +44,21 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 _PREFIX = "__AUTOTEST_EVENT__:"
+_REPORTS_BY_NODEID: dict[str, dict[str, Any]] = {}
+_META_BY_NODEID: dict[str, dict[str, Any]] = {}
 
 
 def _emit(payload: dict[str, Any]) -> None:
-    print(f"\\n{_PREFIX}{json.dumps(payload, ensure_ascii=False)}", flush=True)
+    stream = sys.__stdout__ if sys.__stdout__ is not None else sys.stdout
+    stream.write(f"\\n{_PREFIX}{json.dumps(payload, ensure_ascii=False)}\\n")
+    stream.flush()
 
 
 def _base_func_name(nodeid: str) -> str:
@@ -134,7 +141,7 @@ def _autotest_page_observer(request: pytest.FixtureRequest):
         except Exception:
             screenshot_path = ""
 
-    request.node._autotest_meta = {
+    _META_BY_NODEID[request.node.nodeid] = {
         "screenshot_path": screenshot_path,
         "console_errors": console_errors,
         "network_errors": network_errors,
@@ -142,6 +149,8 @@ def _autotest_page_observer(request: pytest.FixtureRequest):
 
 
 def pytest_runtest_logstart(nodeid: str, location: Any) -> None:
+    _REPORTS_BY_NODEID[nodeid] = {}
+    _META_BY_NODEID.pop(nodeid, None)
     _emit(
         {
             "type": "test_started",
@@ -154,25 +163,36 @@ def pytest_runtest_logstart(nodeid: str, location: Any) -> None:
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]):
     outcome = yield
     report = outcome.get_result()
-    setattr(item, f"_autotest_rep_{report.when}", report)
     if report.when in ("setup", "call") and report.failed:
         item._autotest_failed = True
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
-    yield
-    rep_setup = getattr(item, "_autotest_rep_setup", None)
-    rep_call = getattr(item, "_autotest_rep_call", None)
-    rep_teardown = getattr(item, "_autotest_rep_teardown", None)
-    meta = getattr(item, "_autotest_meta", {}) or {}
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    bucket = _REPORTS_BY_NODEID.setdefault(report.nodeid, {})
+    bucket[report.when] = report
+
+
+def pytest_runtest_logfinish(nodeid: str, location: Any) -> None:
+    reports = _REPORTS_BY_NODEID.pop(nodeid, {})
+    meta = _META_BY_NODEID.pop(nodeid, {}) or {}
+    rep_setup = reports.get("setup")
+    rep_call = reports.get("call")
+    rep_teardown = reports.get("teardown")
 
     status = "passed"
-    primary = rep_call or rep_setup
+    primary = rep_call or rep_setup or rep_teardown
     duration_s = 0.0
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
     for rep in (rep_setup, rep_call, rep_teardown):
         if rep is not None:
             duration_s += float(getattr(rep, "duration", 0.0) or 0.0)
+            out = str(getattr(rep, "capstdout", "") or "")
+            err = str(getattr(rep, "capstderr", "") or "")
+            if out:
+                stdout_parts.append(out)
+            if err:
+                stderr_parts.append(err)
 
     if rep_setup is not None and rep_setup.failed:
         status = "error"
@@ -180,38 +200,32 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
     elif rep_setup is not None and rep_setup.skipped:
         status = "skipped"
         primary = rep_setup
-    elif rep_call is not None:
-        if rep_call.failed:
-            status = "failed"
-        elif rep_call.skipped:
-            status = "skipped"
-        else:
-            status = "passed"
+    elif rep_call is not None and rep_call.failed:
+        status = "failed"
+        primary = rep_call
+    elif rep_call is not None and rep_call.skipped:
+        status = "skipped"
+        primary = rep_call
     elif rep_teardown is not None and rep_teardown.failed:
         status = "error"
         primary = rep_teardown
 
     traceback_text = ""
     error_message = ""
-    stdout_text = ""
-    stderr_text = ""
-    if primary is not None:
-        stdout_text = str(getattr(primary, "capstdout", "") or "")
-        stderr_text = str(getattr(primary, "capstderr", "") or "")
-        if status in ("failed", "error", "skipped"):
-            traceback_text = str(getattr(primary, "longreprtext", "") or "")
-            error_message = _extract_error_message(primary, traceback_text)
+    if primary is not None and status in ("failed", "error", "skipped"):
+        traceback_text = str(getattr(primary, "longreprtext", "") or "")
+        error_message = _extract_error_message(primary, traceback_text)
 
     _emit(
         {
             "type": "test_finished",
-            "function_name": _base_func_name(item.nodeid),
+            "function_name": _base_func_name(nodeid),
             "status": status,
             "duration_ms": max(0, int(round(duration_s * 1000))),
             "error_message": error_message,
             "traceback": traceback_text,
-            "stdout": stdout_text,
-            "stderr": stderr_text,
+            "stdout": "".join(stdout_parts),
+            "stderr": "".join(stderr_parts),
             "screenshot_path": meta.get("screenshot_path", ""),
             "console_errors": meta.get("console_errors", []),
             "network_errors": meta.get("network_errors", []),
@@ -278,6 +292,7 @@ class ExecutionRunner:
             suite_dir,
             base_url=base_url,
             shared_browser_context=shared_context,
+            include_excluded=True,
         )
 
         plugin_path = run_dir / "_autotest_runner_plugin.py"
@@ -293,7 +308,7 @@ class ExecutionRunner:
             str(suite_dir),
             "-p",
             "_autotest_runner_plugin",
-            "-s",
+            "--capture=sys",
             "--tb=short",
             str(suite_dir),
         ]
@@ -326,17 +341,24 @@ class ExecutionRunner:
         cancelled = False
         return_code: int | None = None
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(suite_dir),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
+        popen_kwargs: dict[str, Any] = {
+            "cwd": str(suite_dir),
+            "env": env,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+        }
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
 
         line_queue: queue.Queue[str | None] = queue.Queue()
 
@@ -351,61 +373,66 @@ class ExecutionRunner:
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()
 
-        eof = False
-        while not eof:
-            if cancel_event is not None and cancel_event.is_set() and not cancelled:
-                cancelled = True
-                log_lines.append("[AutoTest] Cancellation requested — stopping Pytest...")
-                self._terminate_process(proc)
+        try:
+            eof = False
+            while not eof:
+                if cancel_event is not None and cancel_event.is_set() and not cancelled:
+                    cancelled = True
+                    log_lines.append("[AutoTest] Cancellation requested — stopping Pytest...")
+                    self._terminate_process(proc)
 
-            try:
-                line = line_queue.get(timeout=0.1)
-            except queue.Empty:
-                if proc.poll() is not None and not reader_thread.is_alive():
+                try:
+                    line = line_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if proc.poll() is not None and not reader_thread.is_alive():
+                        break
+                    continue
+
+                if line is None:
+                    eof = True
                     break
-                continue
 
-            if line is None:
-                eof = True
-                break
-
-            stripped = line.rstrip("\r\n")
-            if _EVENT_PREFIX in stripped:
-                before, payload_text = stripped.split(_EVENT_PREFIX, 1)
-                if before.strip():
-                    log_lines.append(before)
+                stripped = line.rstrip("\r\n")
+                if _EVENT_PREFIX in stripped:
+                    before, payload_text = stripped.split(_EVENT_PREFIX, 1)
+                    if before.strip():
+                        log_lines.append(before)
+                        self._emit(
+                            on_event,
+                            ExecutionProgressEvent(
+                                event_type="log",
+                                run_id=run.id,
+                                message=before,
+                            ),
+                        )
+                    self._handle_plugin_event(
+                        run,
+                        payload_text,
+                        results_by_func,
+                        on_result_updated=on_result_updated,
+                        on_event=on_event,
+                    )
+                else:
+                    log_lines.append(stripped)
                     self._emit(
                         on_event,
                         ExecutionProgressEvent(
                             event_type="log",
                             run_id=run.id,
-                            message=before,
+                            message=stripped,
                         ),
                     )
-                self._handle_plugin_event(
-                    run,
-                    payload_text,
-                    results_by_func,
-                    on_result_updated=on_result_updated,
-                    on_event=on_event,
-                )
-            else:
-                log_lines.append(stripped)
-                self._emit(
-                    on_event,
-                    ExecutionProgressEvent(
-                        event_type="log",
-                        run_id=run.id,
-                        message=stripped,
-                    ),
-                )
 
-        reader_thread.join(timeout=2.0)
-        try:
-            return_code = proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            self._terminate_process(proc)
-            return_code = proc.poll()
+            reader_thread.join(timeout=2.0)
+            try:
+                return_code = proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                self._terminate_process(proc)
+                return_code = proc.poll()
+        finally:
+            if proc.stdout is not None:
+                with contextlib.suppress(Exception):
+                    proc.stdout.close()
 
         # Mark any unfinished tests if cancelled or if pytest exited early (e.g. collection error)
         for res in result_list:
@@ -575,12 +602,31 @@ class ExecutionRunner:
         if proc.poll() is not None:
             return
         try:
-            proc.terminate()
-            proc.wait(timeout=3.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=5.0,
+                    check=False,
+                )
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            else:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    os.killpg(pgid, signal.SIGKILL)
         except Exception:
-            logger.debug("Ignored error terminating Pytest subprocess", exc_info=True)
+            try:
+                proc.kill()
+            except Exception:
+                logger.debug("Ignored error terminating Pytest subprocess", exc_info=True)
 
     @staticmethod
     def _emit(on_event: ProgressCallback | None, event: ExecutionProgressEvent) -> None:

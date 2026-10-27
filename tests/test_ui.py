@@ -124,11 +124,26 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
     assert "from playwright.sync_api import" in generated_code
     assert "def test_" in generated_code
 
-    # Test Execution tab syncs generated definitions and enables run actions
+    # Test Execution tab auto-syncs generated definitions without manual refresh()
     assert window.execution_widget is not None
-    window.execution_widget.refresh()
     assert window.execution_widget.tests_list.count() >= 1
     assert window.execution_widget.run_selected_btn.isEnabled()
     assert window.execution_widget.run_independent_btn.isEnabled()
     assert window.execution_widget.run_journey_btn.isEnabled()
     assert not window.execution_widget.stop_btn.isEnabled()
+
+    # Active execution locks project/session deletion & prevents load_session clobbering
+    active_sid = window.execution_widget._session_id
+    window.execution_widget._worker = object()  # type: ignore[assignment]
+    window.execution_widget._active_run_session_id = active_sid
+    window.execution_widget.execution_started.emit()
+    assert not window.delete_project_btn.isEnabled()
+    assert not window.delete_session_btn.isEnabled()
+    assert not window.record_toggle_btn.isEnabled()
+    window.execution_widget.load_session("other-session-id")
+    assert window.execution_widget._session_id == active_sid
+    window.execution_widget._worker = None
+    window.execution_widget._active_run_session_id = None
+    window.execution_widget.execution_finished.emit()
+    assert window.delete_project_btn.isEnabled()
+    assert window.record_toggle_btn.isEnabled()

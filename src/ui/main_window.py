@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
         # Tab 4: Timeline & Scenarios review
         if self._scenario_service is not None:
             self.review_widget = ReviewWidget(self._scenario_service, panel)
+            self.review_widget.scenarios_changed.connect(self._on_scenarios_changed)
             self.tabs.addTab(self.review_widget, "Timeline & Scenarios")
 
         # Tab 5: Test Definitions & Generated Code
@@ -287,6 +288,7 @@ class MainWindow(QMainWindow):
                 self._copy_service,
                 panel,
             )
+            self.definitions_widget.definitions_changed.connect(self._on_definitions_changed)
             self.tabs.addTab(self.definitions_widget, "Test Definitions & Code")
 
         # Tab 6: Built-in Test Execution
@@ -296,7 +298,11 @@ class MainWindow(QMainWindow):
                 self._definition_service,
                 panel,
             )
+            self.execution_widget.execution_started.connect(self._on_execution_state_changed)
+            self.execution_widget.execution_finished.connect(self._on_execution_state_changed)
             self.tabs.addTab(self.execution_widget, "Test Execution")
+
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         layout.addLayout(header_row)
         layout.addWidget(divider)
@@ -343,14 +349,41 @@ class MainWindow(QMainWindow):
         )
         self._update_project_view()
 
+    def _is_execution_running(self) -> bool:
+        return self.execution_widget is not None and self.execution_widget.is_running
+
+    def _is_busy(self) -> bool:
+        return self._active_worker is not None or self._is_execution_running()
+
+    def _on_scenarios_changed(self, _session_id: str) -> None:
+        if self.definitions_widget is not None:
+            self.definitions_widget._reload_from_storage()
+
+    def _on_definitions_changed(self, _session_id: str) -> None:
+        if self.execution_widget is not None and not self.execution_widget.is_running:
+            self.execution_widget.refresh()
+
+    def _on_tab_changed(self, index: int) -> None:
+        widget = self.tabs.widget(index)
+        if (
+            self.execution_widget is not None
+            and widget is self.execution_widget
+            and not self.execution_widget.is_running
+        ):
+            self.execution_widget.refresh()
+
+    def _on_execution_state_changed(self) -> None:
+        self._update_project_view()
+
     def _update_project_view(self) -> None:
         has_active_session = self._active_worker is not None
+        is_busy = self._is_busy()
         project = self._projects.get(self._selected_project_id or "")
 
-        self.edit_project_btn.setEnabled(project is not None and not has_active_session)
-        self.delete_project_btn.setEnabled(project is not None and not has_active_session)
-        self.new_project_btn.setEnabled(not has_active_session)
-        self.project_list.setEnabled(not has_active_session)
+        self.edit_project_btn.setEnabled(project is not None and not is_busy)
+        self.delete_project_btn.setEnabled(project is not None and not is_busy)
+        self.new_project_btn.setEnabled(not is_busy)
+        self.project_list.setEnabled(not is_busy)
 
         if project is None:
             self.project_title_label.setText("No Project Selected")
@@ -368,17 +401,17 @@ class MainWindow(QMainWindow):
                 self.review_widget.load_session(None)
             if self.definitions_widget is not None:
                 self.definitions_widget.load_session(None)
-            if self.execution_widget is not None:
+            if self.execution_widget is not None and not self.execution_widget.is_running:
                 self.execution_widget.load_session(None)
             return
 
         self.project_title_label.setText(project.name)
         meta_parts = [p for p in (project.base_url, project.description) if p]
         self.project_meta_label.setText(" — ".join(meta_parts) if meta_parts else "No details yet.")
-        if not has_active_session:
+        if not is_busy:
             self.start_url_input.setText(project.base_url)
-        self.start_url_input.setEnabled(not has_active_session)
-        self.record_toggle_btn.setEnabled(True)
+        self.start_url_input.setEnabled(not is_busy)
+        self.record_toggle_btn.setEnabled(has_active_session or not self._is_execution_running())
         self._refresh_sessions(project.id)
 
     def _on_new_project(self) -> None:
@@ -421,7 +454,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Updated project '{updated.name}'.", 4000)
 
     def _on_delete_project(self) -> None:
-        if self._selected_project_id is None:
+        if self._selected_project_id is None or self._is_busy():
             return
         project = self._projects.get(self._selected_project_id)
         if project is None:
@@ -452,9 +485,10 @@ class MainWindow(QMainWindow):
         self.sessions_table.setRowCount(len(sessions))
         for row_idx, session in enumerate(sessions):
             self._populate_session_row(row_idx, session)
-        self.delete_session_btn.setEnabled(bool(sessions) and self._active_worker is None)
+        is_busy = self._is_busy()
+        self.delete_session_btn.setEnabled(bool(sessions) and not is_busy)
         self.review_session_btn.setEnabled(
-            bool(sessions) and self._active_worker is None and self.review_widget is not None
+            bool(sessions) and not is_busy and self.review_widget is not None
         )
 
     def _populate_session_row(self, row_idx: int, session: RecordingSession) -> None:
@@ -474,7 +508,7 @@ class MainWindow(QMainWindow):
         self.sessions_table.setItem(row_idx, 5, QTableWidgetItem(ended_str))
 
     def _on_session_selection_changed(self) -> None:
-        if self._active_worker is not None:
+        if self._is_busy():
             return
         row = self.sessions_table.currentRow()
         if row < 0:
@@ -523,6 +557,8 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.review_widget)
 
     def _on_delete_session(self) -> None:
+        if self._is_busy():
+            return
         row = self.sessions_table.currentRow()
         if row < 0 or self._selected_project_id is None:
             return
@@ -552,7 +588,7 @@ class MainWindow(QMainWindow):
 
     def start_recording_session(self) -> None:
         """Create and start a recording session and launch dedicated Chromium off-thread."""
-        if self._selected_project_id is None or self._active_worker is not None:
+        if self._selected_project_id is None or self._is_busy():
             return
 
         start_url = self.start_url_input.text().strip()
@@ -664,7 +700,7 @@ class MainWindow(QMainWindow):
                 session_id,
                 base_url=project.base_url if project is not None else "",
             )
-        if self.execution_widget is not None:
+        if self.execution_widget is not None and not self.execution_widget.is_running:
             self.execution_widget.load_session(session_id)
         self._set_status_badge("Idle", "idle")
         self.statusBar().showMessage(

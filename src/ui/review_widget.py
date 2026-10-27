@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -29,6 +29,8 @@ from src.scenarios import Scenario, ScenarioError, ScenarioService
 
 class ReviewWidget(QWidget):
     """Interactive review panel for correlated timelines and editable scenarios."""
+
+    scenarios_changed = Signal(str)
 
     def __init__(
         self,
@@ -218,6 +220,7 @@ class ReviewWidget(QWidget):
             f"{len(scenarios)} scenario(s) ({result.dropped_count} filtered)"
         )
         self._update_controls()
+        self.scenarios_changed.emit(self._session_id)
 
     def _reload_from_storage(self, select_scenario_id: str | None = None) -> None:
         if self._session_id is None:

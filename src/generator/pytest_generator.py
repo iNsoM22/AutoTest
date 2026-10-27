@@ -78,6 +78,11 @@ def _safe_doc_text(text: str) -> str:
     return cleaned.rstrip("\\")
 
 
+def _safe_comment_text(text: str) -> str:
+    """Collapse newlines so arbitrary text can never break out of a `# ...` comment."""
+    return " ".join(text.splitlines()).strip()
+
+
 def _needs_os_import(definitions: Sequence[TestDefinition]) -> bool:
     return any(
         a.action_type == ProcessedActionType.FILL and a.is_redacted and a.selector is not None
@@ -138,10 +143,10 @@ class PytestPlaywrightGenerator:
         )
         for prereq in definition.prerequisites:
             if prereq.setup_url and not starts_with_nav:
-                lines.append(f"    # Prerequisite: {prereq.description}")
+                lines.append(f"    # Prerequisite: {_safe_comment_text(prereq.description)}")
                 lines.append(f"    {page_fixture}.goto({prereq.setup_url!r})")
             elif prereq.fixture_name == "authenticated_page":
-                lines.append(f"    # Prerequisite: {prereq.description}")
+                lines.append(f"    # Prerequisite: {_safe_comment_text(prereq.description)}")
 
         # Group assertions by after_action_id so they appear right after the step they verify
         assertions_by_action: dict[str | None, list[TestAssertion]] = {}
@@ -386,9 +391,10 @@ class PytestPlaywrightGenerator:
         *,
         base_url: str = "",
         shared_browser_context: bool = False,
+        include_excluded: bool = False,
     ) -> GeneratedSuite:
         """Generate a complete standalone suite (conftest, pytest.ini, and test modules)."""
-        included = [d for d in definitions if d.included]
+        included = list(definitions) if include_excluded else [d for d in definitions if d.included]
         independent = [d for d in included if d.mode == TestMode.INDEPENDENT]
         journeys = [d for d in included if d.mode == TestMode.JOURNEY]
 
@@ -437,25 +443,26 @@ class PytestPlaywrightGenerator:
 
         if atype == ProcessedActionType.OPEN_TAB:
             if action.url and action.url != "about:blank":
-                lines.append(f"    # Opened tab: {action.url}")
+                lines.append(f"    # Opened tab: {_safe_comment_text(action.url)}")
                 lines.append(f"    {page_var}.goto({action.url!r})")
             return lines
 
         if atype == ProcessedActionType.CLOSE_TAB:
-            lines.append(f"    # Recorded tab close: {action.summary}")
+            lines.append(f"    # Recorded tab close: {_safe_comment_text(action.summary)}")
             return lines
 
         if atype == ProcessedActionType.SCROLL:
-            lines.append(f"    # {action.summary}")
+            lines.append(f"    # {_safe_comment_text(action.summary)}")
             return lines
 
         locator = _locator_expr(page_var, action.selector) if action.selector else None
+        safe_summary = _safe_comment_text(action.summary)
 
         if atype == ProcessedActionType.CLICK:
             if locator is not None:
                 lines.append(f"    {locator}.click()")
             else:
-                lines.append(f"    # TODO: add selector for click step ({action.summary})")
+                lines.append(f"    # TODO: add selector for click step ({safe_summary})")
             return lines
 
         if atype == ProcessedActionType.FILL:
@@ -469,14 +476,14 @@ class PytestPlaywrightGenerator:
                 else:
                     lines.append(f"    {locator}.fill({action.value!r})")
             else:
-                lines.append(f"    # TODO: add selector for fill step ({action.summary})")
+                lines.append(f"    # TODO: add selector for fill step ({safe_summary})")
             return lines
 
         if atype == ProcessedActionType.SELECT:
             if locator is not None:
                 lines.append(f"    {locator}.select_option({action.value!r})")
             else:
-                lines.append(f"    # TODO: add selector for select step ({action.summary})")
+                lines.append(f"    # TODO: add selector for select step ({safe_summary})")
             return lines
 
         if atype == ProcessedActionType.CHECK:
@@ -484,13 +491,15 @@ class PytestPlaywrightGenerator:
                 method = "check" if action.checked is not False else "uncheck"
                 lines.append(f"    {locator}.{method}()")
             else:
-                lines.append(f"    # TODO: add selector for check step ({action.summary})")
+                lines.append(f"    # TODO: add selector for check step ({safe_summary})")
             return lines
 
         if atype == ProcessedActionType.SUBMIT:
             if action.key:
                 key = _normalize_playwright_key(action.key)
                 lines.append(f"    {page_var}.keyboard.press({key!r})")
+            elif action.via_form_submit and locator is not None:
+                lines.append(f"    {locator}.evaluate('form => form.requestSubmit()')")
             elif locator is not None:
                 lines.append(f"    {locator}.click()")
             else:
@@ -510,19 +519,22 @@ class PytestPlaywrightGenerator:
                 lines.append(f"    {locator}.hover()")
             return lines
 
-        lines.append(f"    # Unsupported action '{atype.value}': {action.summary}")
+        lines.append(
+            f"    # Unsupported action '{atype.value}': {_safe_comment_text(action.summary)}"
+        )
         return lines
 
     def _render_assertion(self, assertion: TestAssertion, page_var: str) -> list[str]:
         conf = assertion.confidence.value
+        safe_desc = _safe_comment_text(assertion.description)
         if not assertion.enabled:
-            return [f"    # REVIEW [{conf}] (disabled): {assertion.description}"]
+            return [f"    # REVIEW [{conf}] (disabled): {safe_desc}"]
 
         lines: list[str] = []
         if assertion.needs_review:
-            lines.append(f"    # REVIEW [{conf}]: {assertion.description}")
+            lines.append(f"    # REVIEW [{conf}]: {safe_desc}")
         else:
-            lines.append(f"    # Assert [{conf}]: {assertion.description}")
+            lines.append(f"    # Assert [{conf}]: {safe_desc}")
 
         atype = assertion.assertion_type
         if atype == AssertionType.URL_CONTAINS:
@@ -540,7 +552,7 @@ class PytestPlaywrightGenerator:
                 loc = _locator_expr(page_var, assertion.selector)
                 lines.append(f"    expect({loc}).to_be_visible()")
             else:
-                lines.append(f"    # TODO: missing selector for assertion: {assertion.description}")
+                lines.append(f"    # TODO: missing selector for assertion: {safe_desc}")
         elif atype == AssertionType.ELEMENT_CHECKED:
             if assertion.selector is not None:
                 loc = _locator_expr(page_var, assertion.selector)
@@ -552,8 +564,7 @@ class PytestPlaywrightGenerator:
                 loc = _locator_expr(page_var, assertion.selector)
                 lines.append(f"    expect({loc}).to_have_value({assertion.expected!r})")
         elif atype == AssertionType.NETWORK_RESPONSE:
-            lines.append(
-                f"    # Network evidence ({assertion.expected}): pair with a visible UI assertion."
-            )
+            safe_exp = _safe_comment_text(assertion.expected)
+            lines.append(f"    # Network evidence ({safe_exp}): pair with a visible UI assertion.")
 
         return lines

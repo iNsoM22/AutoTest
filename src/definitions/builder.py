@@ -255,6 +255,7 @@ class TestDefinitionBuilder:
         key = ""
         checked: bool | None = None
         is_redacted = False
+        via_form_submit = False
 
         if event.action_type in (ProcessedActionType.NAVIGATE, ProcessedActionType.OPEN_TAB):
             url = str(event.payload.get("url", ""))
@@ -276,6 +277,13 @@ class TestDefinitionBuilder:
             key = "+".join([*mods, raw_key]) if mods and raw_key else raw_key
         elif event.action_type == ProcessedActionType.SUBMIT:
             key = str(event.payload.get("trigger_key", ""))
+            has_trigger_target = isinstance(event.payload.get("trigger_target"), dict)
+            if (
+                not key
+                and not has_trigger_target
+                and str(effective_target.get("tag", "")).strip().lower() == "form"
+            ):
+                via_form_submit = True
 
         return TestAction(
             order_index=order_index,
@@ -288,6 +296,7 @@ class TestDefinitionBuilder:
             key=key,
             checked=checked,
             is_redacted=is_redacted,
+            via_form_submit=via_form_submit,
             source_processed_event_id=event.id,
             raw_event_ids=list(event.raw_event_ids),
         )

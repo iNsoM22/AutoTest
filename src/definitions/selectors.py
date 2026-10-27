@@ -74,7 +74,11 @@ def _infer_role(target: dict[str, Any]) -> str:
             return "checkbox"
         if input_type == "radio":
             return "radio"
-        if input_type in ("", "text", "email", "password", "search", "tel", "url", "number"):
+        if input_type == "search":
+            return "searchbox"
+        if input_type == "number":
+            return "spinbutton"
+        if input_type in ("", "text", "email", "tel", "url"):
             return "textbox"
         return ""
     return _TAG_TO_ROLE.get(tag, "")
@@ -108,14 +112,24 @@ def build_selector_candidates(
             candidates.append(candidate)
 
     test_id = str(target.get("test_id", "")).strip()
+    test_id_attr = str(target.get("test_id_attr", "")).strip().lower()
     if test_id:
-        _add(
-            SelectorCandidate(
-                strategy=SelectorStrategy.TEST_ID,
-                value=test_id,
-                confidence=0.98,
+        if test_id_attr in ("data-test-id", "data-cy"):
+            _add(
+                SelectorCandidate(
+                    strategy=SelectorStrategy.CSS,
+                    value=f'[{test_id_attr}="{_css_attr_escape(test_id)}"]',
+                    confidence=0.98,
+                )
             )
-        )
+        else:
+            _add(
+                SelectorCandidate(
+                    strategy=SelectorStrategy.TEST_ID,
+                    value=test_id,
+                    confidence=0.98,
+                )
+            )
 
     aria_label = str(target.get("aria_label", "")).strip()
     raw_text = " ".join(str(target.get("text", "")).split())

@@ -105,6 +105,7 @@ class TestAction(BaseModel):
     key: str = ""
     checked: bool | None = None
     is_redacted: bool = False
+    via_form_submit: bool = False
     source_processed_event_id: str | None = None
     raw_event_ids: list[str] = Field(default_factory=list)
 

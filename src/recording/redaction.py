@@ -9,8 +9,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 REDACTED_VALUE = "[REDACTED]"
 
 _SENSITIVE_KEY_PATTERN = re.compile(
-    r"(password|passwd|pwd|secret|token|api[_-]?key|auth|authorization|cookie|"
-    r"session[_-]?id|credit[_-]?card|card[_-]?number|cvv|cvc|ssn|pin|otp|private[_-]?key)",
+    r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|"
+    r"session[_-]?id|credit[_-]?card|card[_-]?number|private[_-]?key|"
+    r"(?:^|[^a-z0-9])(?:pwd|auth|cvv|cvc|ssn|pin|otp)(?:$|[^a-z0-9]))",
     re.IGNORECASE,
 )
 

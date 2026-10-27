@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -40,6 +40,8 @@ from src.processing import ProcessedActionType
 
 class DefinitionsWidget(QWidget):
     """Interactive editor for Layer 3 test definitions and live Pytest/Playwright code preview."""
+
+    definitions_changed = Signal(str)
 
     def __init__(
         self,
@@ -327,6 +329,7 @@ class DefinitionsWidget(QWidget):
             f"{label}: Generated {len(definitions)} editable test definition(s)."
         )
         self._update_controls()
+        self.definitions_changed.emit(self._session_id)
 
     def _reload_from_storage(self, select_definition_id: str | None = None) -> None:
         if self._session_id is None:
@@ -348,6 +351,8 @@ class DefinitionsWidget(QWidget):
                 f"{label}: No test definitions yet. Click 'Generate from Scenarios'."
             )
         self._update_controls()
+        if select_definition_id is not None and self._session_id is not None:
+            self.definitions_changed.emit(self._session_id)
 
     def _render_definitions_list(self, select_index: int = -1) -> None:
         self.definitions_list.blockSignals(True)

@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from src.definitions.models import TestDefinition, TestMode
+from src.definitions.models import TestDefinition, TestMode, slugify_test_function_name
 from src.definitions.repository import TestDefinitionRepository
 from src.execution.models import (
     ExecutionError,
@@ -93,7 +93,7 @@ class ExecutionService:
             TestCaseResult(
                 run_id=run.id,
                 definition_id=defn.id,
-                function_name=defn.function_name,
+                function_name=defn.function_name or slugify_test_function_name(defn.name),
                 test_name=defn.name,
                 status=TestResultStatus.PENDING,
                 order_index=idx,
