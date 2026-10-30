@@ -13,7 +13,8 @@ from src.browser import BrowserCallbacks, BrowserLaunchConfig, BrowserManager, P
 from src.execution import ExecutionMode, ExecutionProgressEvent, ExecutionService
 from src.projects import SessionService
 from src.recording import RawEvent, RecordingEngine
-from src.storage import RawEventRepository
+from src.scenarios import ScenarioService
+from src.storage import Database, RawEventRepository
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,8 @@ class BrowserSessionWorker(QThread):
                 self._emit_pending_ui_events(engine.event_count)
             except Exception:
                 logger.exception("Failed to flush recorded events for session %s", self._session_id)
+            finally:
+                Database.close_current_thread_connections()
 
         self.session_finished.emit(self._session_id)
 
@@ -242,5 +245,42 @@ class TestExecutionWorker(QThread):
             logger.exception("Test execution worker failed")
             self.run_failed.emit(str(exc))
             return
+        finally:
+            Database.close_current_thread_connections()
 
         self.run_completed.emit(run, results)
+
+
+class SessionProcessingWorker(QThread):
+    """Runs deterministic event processing and scenario detection off the Qt UI thread."""
+
+    processing_finished = Signal(str, object, object)
+    processing_failed = Signal(str, str)
+
+    def __init__(
+        self,
+        scenario_service: ScenarioService,
+        session_id: str,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._scenario_service = scenario_service
+        self._session_id = session_id
+
+    @property
+    def session_id(self) -> str:
+        """Return the recording session ID being processed."""
+        return self._session_id
+
+    def run(self) -> None:
+        """Process raw events into a correlated timeline and scenarios."""
+        try:
+            result, scenarios = self._scenario_service.process_session(self._session_id)
+        except Exception as exc:
+            logger.exception("Session processing worker failed for session %s", self._session_id)
+            self.processing_failed.emit(self._session_id, str(exc))
+            return
+        finally:
+            Database.close_current_thread_connections()
+
+        self.processing_finished.emit(self._session_id, result, scenarios)

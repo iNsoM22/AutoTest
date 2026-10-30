@@ -16,6 +16,23 @@ _SENSITIVE_KEY_PATTERN = re.compile(
 )
 
 _SENSITIVE_INPUT_TYPES = frozenset({"password"})
+_NON_SECRET_KEYS = frozenset(
+    {
+        "Enter",
+        "Escape",
+        "Tab",
+        "Backspace",
+        "Delete",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+    }
+)
 
 _BEARER_PATTERN = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
@@ -51,8 +68,34 @@ def is_sensitive_key(name: str) -> bool:
     return bool(name and _SENSITIVE_KEY_PATTERN.search(name))
 
 
+def _redact_query_string(query: str) -> str:
+    pairs = parse_qsl(query, keep_blank_values=True)
+    redacted_pairs = [
+        (key, REDACTED_VALUE if is_sensitive_key(key) else redact_string(value))
+        for key, value in pairs
+    ]
+    return urlencode(redacted_pairs, doseq=True)
+
+
+def _redact_fragment(fragment: str) -> str:
+    if not fragment:
+        return ""
+    if "?" in fragment:
+        prefix, frag_query = fragment.split("?", 1)
+        return f"{redact_string(prefix)}?{_redact_query_string(frag_query)}"
+    if "=" in fragment:
+        pairs = parse_qsl(fragment, keep_blank_values=True)
+        if pairs:
+            redacted_pairs = [
+                (key, REDACTED_VALUE if is_sensitive_key(key) else redact_string(value))
+                for key, value in pairs
+            ]
+            return urlencode(redacted_pairs, doseq=True)
+    return redact_string(fragment)
+
+
 def redact_url(url: str) -> str:
-    """Redact credentials in userinfo and sensitive query parameters from a URL."""
+    """Redact credentials in userinfo, sensitive query params, and fragment tokens from a URL."""
     if not url or url.startswith(("about:", "data:", "javascript:")):
         return url
 
@@ -62,22 +105,9 @@ def redact_url(url: str) -> str:
         _, host_part = netloc.rsplit("@", 1)
         netloc = f"{REDACTED_VALUE}@{host_part}"
 
-    if not parts.query:
-        return urlunsplit((parts.scheme, netloc, parts.path, "", parts.fragment))
-
-    pairs = parse_qsl(parts.query, keep_blank_values=True)
-    redacted_pairs = [
-        (key, REDACTED_VALUE if is_sensitive_key(key) else value) for key, value in pairs
-    ]
-    return urlunsplit(
-        (
-            parts.scheme,
-            netloc,
-            parts.path,
-            urlencode(redacted_pairs, doseq=True),
-            parts.fragment,
-        )
-    )
+    redacted_query = _redact_query_string(parts.query) if parts.query else ""
+    redacted_fragment = _redact_fragment(parts.fragment) if parts.fragment else ""
+    return urlunsplit((parts.scheme, netloc, parts.path, redacted_query, redacted_fragment))
 
 
 def redact_string(value: str) -> str:
@@ -115,10 +145,18 @@ def redact_target_and_payload(
     )
 
     if is_sensitive_target:
-        for field in ("value", "text", "key"):
+        redacted_any = False
+        for field in ("value", "text"):
             if field in clean_payload and clean_payload[field]:
                 clean_payload[field] = REDACTED_VALUE
-        clean_payload["redacted"] = True
+                redacted_any = True
+        if "key" in clean_payload and clean_payload["key"]:
+            key_str = str(clean_payload["key"])
+            if key_str not in _NON_SECRET_KEYS:
+                clean_payload["key"] = REDACTED_VALUE
+                redacted_any = True
+        if redacted_any or "value" in clean_payload:
+            clean_payload["redacted"] = True
 
     return clean_target, clean_payload
 

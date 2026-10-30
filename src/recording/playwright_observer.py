@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+import weakref
 from contextlib import suppress
 from typing import Any
 
@@ -22,7 +23,7 @@ class PlaywrightObserver:
 
     def __init__(self, collector: EventCollector) -> None:
         self._collector = collector
-        self._request_ids: dict[int, str] = {}
+        self._request_ids: weakref.WeakKeyDictionary[Request, str] = weakref.WeakKeyDictionary()
 
     def record_tab_open(self, info: PageInfo) -> None:
         """Record a newly opened browser tab."""
@@ -73,7 +74,7 @@ class PlaywrightObserver:
 
     def _on_request(self, page_id: str, request: Request) -> None:
         correlation_id = uuid.uuid4().hex
-        self._request_ids[id(request)] = correlation_id
+        self._request_ids[request] = correlation_id
         self._collector.record(
             event_type=EventType.REQUEST,
             source=EventSource.PLAYWRIGHT,
@@ -89,7 +90,7 @@ class PlaywrightObserver:
 
     def _on_response(self, page_id: str, response: Response) -> None:
         request = response.request
-        correlation_id = self._request_ids.pop(id(request), None)
+        correlation_id = self._request_ids.pop(request, None)
         content_type = ""
         with suppress(PlaywrightError):
             content_type = response.headers.get("content-type", "")
@@ -111,7 +112,7 @@ class PlaywrightObserver:
         )
 
     def _on_request_failed(self, page_id: str, request: Request) -> None:
-        correlation_id = self._request_ids.pop(id(request), None)
+        correlation_id = self._request_ids.pop(request, None)
         self._collector.record(
             event_type=EventType.REQUEST_FAILED,
             source=EventSource.PLAYWRIGHT,

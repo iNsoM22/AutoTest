@@ -356,6 +356,53 @@
     });
   }
 
+  const NOTABLE_ATTRS = new Set(["hidden", "open", "aria-expanded", "aria-hidden", "disabled"]);
+  const VISIBILITY_CLASS_RE = /\b(hidden|d-none|sr-only|open|active|visible|show|error|alert|modal|toast)\b/i;
+
+  function isElementVisible(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.hidden || el.getAttribute("aria-hidden") === "true") return false;
+    try {
+      const style = window.getComputedStyle(el);
+      return style.display !== "none" && style.visibility !== "hidden";
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function collectNotableAttribute(rec) {
+    const el = rec.target;
+    if (!el || el.nodeType !== 1 || mutationSummary.notable.length >= 5) return;
+    const attr = rec.attributeName || "";
+    const isDirectAttr = NOTABLE_ATTRS.has(attr);
+    const isNotableClass =
+      attr === "class" &&
+      (VISIBILITY_CLASS_RE.test(el.className || "") ||
+        VISIBILITY_CLASS_RE.test(rec.oldValue || "") ||
+        Boolean(el.id) ||
+        (el.matches && el.matches(NOTABLE_MUTATION_SELECTOR)));
+    if (!isDirectAttr && !isNotableClass) return;
+
+    const tag = el.tagName.toLowerCase();
+    const id = el.id || "";
+    const alreadyRecorded = mutationSummary.notable.some(
+      (item) => item.id === id && item.tag === tag && item.attribute === attr
+    );
+    if (alreadyRecorded) return;
+
+    const visible = isElementVisible(el);
+    const text = visible ? cleanText(el.innerText || el.textContent || "", 100) : "";
+    mutationSummary.notable.push({
+      tag,
+      role: el.getAttribute("role") || "",
+      id,
+      attribute: attr,
+      value: el.getAttribute(attr) ?? "",
+      visible,
+      text,
+    });
+  }
+
   function flushMutations() {
     mutationTimer = null;
     if (
@@ -387,6 +434,7 @@
           }
         } else if (rec.type === "attributes") {
           mutationSummary.attribute_changes += 1;
+          collectNotableAttribute(rec);
         }
       }
       if (mutationTimer === null) {
@@ -397,6 +445,7 @@
       childList: true,
       subtree: true,
       attributes: true,
+      attributeOldValue: true,
       attributeFilter: ["class", "hidden", "aria-expanded", "aria-hidden", "disabled", "open"],
     });
   }

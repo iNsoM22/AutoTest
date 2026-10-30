@@ -301,7 +301,15 @@ class ProcessingEngine:
             if etype == EventType.DOM_MUTATION:
                 notable = event.payload.get("notable", [])
                 texts = [str(n.get("text", "")).strip() for n in notable if n.get("text")]
-                preview = "; ".join(texts[:2]) if texts else "DOM updated"
+                if not texts:
+                    attr_notes = [
+                        f"{n.get('id') or n.get('tag', 'element')} {n.get('attribute')} changed"
+                        for n in notable
+                        if isinstance(n, dict) and n.get("attribute")
+                    ]
+                    preview = "; ".join(attr_notes[:2]) if attr_notes else "DOM updated"
+                else:
+                    preview = "; ".join(texts[:2])
                 outcomes.append(
                     (
                         event.page_id,
@@ -547,6 +555,7 @@ class ProcessingEngine:
     ) -> list[CorrelatedOutcome]:
         uncorrelated: list[CorrelatedOutcome] = []
         window_ms = float(self._config.correlation_window_ms)
+        action_end_times = {id(action): action.ended_at for action in actions}
 
         for page_id, outcome in pending_outcomes:
             candidate: ProcessedEvent | None = None
@@ -555,7 +564,8 @@ class ProcessingEngine:
                     continue
                 if action.started_at > outcome.timestamp:
                     continue
-                delta = _ms_between(action.started_at, outcome.timestamp)
+                action_end = action_end_times[id(action)]
+                delta = _ms_between(action_end, outcome.timestamp)
                 if delta <= window_ms:
                     candidate = action
                 break

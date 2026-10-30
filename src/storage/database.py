@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import weakref
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,9 @@ class Database:
     Maintains one SQLite connection per thread with consistent pragmas
     (`foreign_keys = ON`, optional `journal_mode = WAL`, and `busy_timeout`).
     """
+
+    _instances_lock = threading.Lock()
+    _instances: weakref.WeakSet[Database] = weakref.WeakSet()
 
     def __init__(
         self,
@@ -31,7 +35,9 @@ class Database:
         self._timeout_seconds = timeout_seconds
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._connections: list[sqlite3.Connection] = []
+        self._connections: dict[int, sqlite3.Connection] = {}
+        with self._instances_lock:
+            self._instances.add(self)
 
     @property
     def db_path(self) -> Path:
@@ -59,8 +65,9 @@ class Database:
         self._configure_connection(conn)
 
         self._local.connection = conn
+        tid = threading.get_ident()
         with self._lock:
-            self._connections.append(conn)
+            self._connections[tid] = conn
         return conn
 
     def _configure_connection(self, conn: sqlite3.Connection) -> None:
@@ -106,18 +113,27 @@ class Database:
         if conn is None:
             return
         self._local.connection = None
+        tid = threading.get_ident()
         with self._lock:
-            if conn in self._connections:
-                self._connections.remove(conn)
-        conn.close()
+            self._connections.pop(tid, None)
+        with suppress(sqlite3.Error):
+            conn.close()
+
+    @classmethod
+    def close_current_thread_connections(cls) -> None:
+        """Close SQLite connections owned by the current thread across all Database instances."""
+        with cls._instances_lock:
+            instances = list(cls._instances)
+        for instance in instances:
+            instance.close()
 
     def close_all(self) -> None:
-        """Close all connections opened across threads (useful during shutdown)."""
+        """Close the current thread's connection and attempt cleanup of any remaining ones."""
+        self.close()
         with self._lock:
-            connections = list(self._connections)
+            remaining = list(self._connections.values())
             self._connections.clear()
-        self._local.connection = None
-        for conn in connections:
+        for conn in remaining:
             try:
                 conn.close()
             except sqlite3.Error:

@@ -110,7 +110,14 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
     # Process and review the recorded session in the Timeline & Scenarios tab
     assert window.review_widget is not None
     window.review_widget.process_current_session()
-    assert window.review_widget.scenarios_list.count() >= 1
+    qtbot.waitUntil(
+        lambda: (
+            window.review_widget is not None
+            and not window.review_widget.is_processing
+            and window.review_widget.scenarios_list.count() >= 1
+        ),
+        timeout=5000,
+    )
     assert window.review_widget.timeline_table.rowCount() >= 1
     window.review_widget.timeline_table.selectRow(0)
     assert "raw_event_ids" in window.review_widget.evidence_inspector.toPlainText()

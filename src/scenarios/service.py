@@ -140,6 +140,11 @@ class ScenarioService:
             raise ScenarioError("Can only merge scenarios from the same recording session.")
 
         targets.sort(key=lambda s: s.order_index)
+        order_indices = [s.order_index for s in targets]
+        expected_indices = list(range(order_indices[0], order_indices[0] + len(order_indices)))
+        if order_indices != expected_indices:
+            raise ScenarioError("Can only merge adjacent scenarios in chronological order.")
+
         first = targets[0]
         merged_processed_ids = _dedupe_preserve(
             [eid for s in targets for eid in s.processed_event_ids]

@@ -180,7 +180,9 @@ class BrowserManager:
             self._playwright = None
 
         self._pages.clear()
-        if previous_state != BrowserState.ERROR:
+        if previous_state == BrowserState.ERROR:
+            self._state = BrowserState.ERROR
+        else:
             self._state = BrowserState.CLOSED
         logger.info("Closed dedicated Chromium session")
 

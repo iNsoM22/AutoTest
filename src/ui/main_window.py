@@ -517,6 +517,7 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         session_id = str(item.data(Qt.ItemDataRole.UserRole))
+        self._load_session_pages(session_id)
         self._load_session_events(session_id)
         if self.review_widget is not None:
             self.review_widget.load_session(session_id, item.text())
@@ -742,6 +743,20 @@ class MainWindow(QMainWindow):
                 row_idx, 3, QTableWidgetItem("Closed" if page.is_closed else "Open")
             )
 
+    def _load_session_pages(self, session_id: str) -> None:
+        pages = self._session_service.list_pages(session_id)
+        self._tracked_pages = {
+            page.id: PageInfo(
+                page_id=page.id,
+                tab_index=page.tab_index,
+                url=page.last_url or page.initial_url,
+                title=page.title,
+                is_closed=page.closed_at is not None,
+            )
+            for page in pages
+        }
+        self._refresh_pages_table()
+
     def _clear_events_table(self) -> None:
         self._event_count = 0
         self.events_table.setRowCount(0)
@@ -814,7 +829,9 @@ class MainWindow(QMainWindow):
             style.polish(widget)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Ensure any active browser or execution worker stops cleanly before exiting."""
+        """Ensure any active browser, review, or execution worker stops cleanly before exiting."""
+        if self.review_widget is not None:
+            self.review_widget.shutdown()
         if self.execution_widget is not None:
             self.execution_widget.shutdown()
         if self._active_worker is not None:

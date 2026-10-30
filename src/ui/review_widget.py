@@ -23,8 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.processing import ProcessedEvent
+from src.processing import ProcessedEvent, ProcessingResult
 from src.scenarios import Scenario, ScenarioError, ScenarioService
+from src.ui.workers import SessionProcessingWorker
 
 
 class ReviewWidget(QWidget):
@@ -44,9 +45,24 @@ class ReviewWidget(QWidget):
         self._scenarios: list[Scenario] = []
         self._timeline: list[ProcessedEvent] = []
         self._visible_events: list[ProcessedEvent] = []
+        self._worker: SessionProcessingWorker | None = None
 
         self._build_ui()
         self._update_controls()
+
+    @property
+    def is_processing(self) -> bool:
+        """Return True while background session processing is running."""
+        return self._worker is not None
+
+    def shutdown(self) -> None:
+        """Wait for any active background processing worker before widget teardown."""
+        worker = self._worker
+        if worker is not None:
+            worker.wait(5000)
+            if not worker.isRunning():
+                worker.deleteLater()
+                self._worker = None
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -201,26 +217,60 @@ class ReviewWidget(QWidget):
         self._reload_from_storage()
 
     def process_current_session(self) -> None:
-        """Run deterministic processing and scenario detection on the current session."""
-        if self._session_id is None:
+        """Run deterministic processing and scenario detection off the UI thread."""
+        if self._session_id is None or self._worker is not None:
             return
-        try:
-            result, scenarios = self._scenario_service.process_session(self._session_id)
-        except ScenarioError as exc:
-            QMessageBox.warning(self, "Processing Failed", str(exc))
+        worker = SessionProcessingWorker(self._scenario_service, self._session_id, parent=self)
+        worker.processing_finished.connect(self._on_processing_finished)
+        worker.processing_failed.connect(self._on_processing_failed)
+        self._worker = worker
+        label = self._session_name or self._session_id[:8]
+        self.summary_label.setText(f"{label}: Processing raw events...")
+        self._update_controls()
+        worker.start()
+
+    def _on_processing_finished(
+        self,
+        session_id: str,
+        result_obj: object,
+        scenarios_obj: object,
+    ) -> None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.wait(5000)
+            worker.deleteLater()
+
+        if session_id != self._session_id:
+            self._update_controls()
+            return
+        if not isinstance(result_obj, ProcessingResult) or not isinstance(scenarios_obj, list):
+            self._update_controls()
             return
 
-        self._timeline = result.processed_events
+        scenarios: list[Scenario] = scenarios_obj
+        self._timeline = result_obj.processed_events
         self._scenarios = scenarios
         self._render_scenarios(select_index=0 if scenarios else -1)
         self._refresh_timeline_table()
         self.summary_label.setText(
             f"{self._session_name or self._session_id[:8]}: "
-            f"{result.raw_event_count} raw -> {len(result.processed_events)} steps -> "
-            f"{len(scenarios)} scenario(s) ({result.dropped_count} filtered)"
+            f"{result_obj.raw_event_count} raw -> {len(result_obj.processed_events)} steps -> "
+            f"{len(scenarios)} scenario(s) ({result_obj.dropped_count} filtered)"
         )
         self._update_controls()
         self.scenarios_changed.emit(self._session_id)
+
+    def _on_processing_failed(self, session_id: str, error_message: str) -> None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.wait(5000)
+            worker.deleteLater()
+
+        self._update_controls()
+        if session_id == self._session_id:
+            QMessageBox.warning(self, "Processing Failed", error_message)
 
     def _reload_from_storage(self, select_scenario_id: str | None = None) -> None:
         if self._session_id is None:
@@ -430,18 +480,19 @@ class ReviewWidget(QWidget):
 
     def _update_controls(self) -> None:
         has_session = self._session_id is not None
+        busy = self._worker is not None
         selected = self._selected_scenarios()
         single = len(selected) == 1
         multi = len(selected) >= 2
 
-        self.process_btn.setEnabled(has_session)
-        self.show_all_steps_btn.setEnabled(has_session and bool(self._timeline))
-        self.rename_btn.setEnabled(single)
-        self.toggle_include_btn.setEnabled(single)
-        self.delete_btn.setEnabled(single)
-        self.merge_btn.setEnabled(multi)
+        self.process_btn.setEnabled(has_session and not busy)
+        self.show_all_steps_btn.setEnabled(has_session and not busy and bool(self._timeline))
+        self.rename_btn.setEnabled(single and not busy)
+        self.toggle_include_btn.setEnabled(single and not busy)
+        self.delete_btn.setEnabled(single and not busy)
+        self.merge_btn.setEnabled(multi and not busy)
 
-        if single:
+        if single and not busy:
             sc = selected[0]
             self.toggle_include_btn.setText("Exclude" if sc.included else "Include")
             idx = self._scenarios.index(sc)
