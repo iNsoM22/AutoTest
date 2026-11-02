@@ -189,6 +189,7 @@ class TestExecutionWorker(QThread):
         mode: ExecutionMode = ExecutionMode.INDEPENDENT,
         rerun_failed_run_id: str | None = None,
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -198,6 +199,7 @@ class TestExecutionWorker(QThread):
         self._mode = mode
         self._rerun_failed_run_id = rerun_failed_run_id
         self._headed = headed
+        self._extra_env = dict(extra_env) if extra_env else None
         self._cancel_event = threading.Event()
 
     def request_cancel(self) -> None:
@@ -215,6 +217,7 @@ class TestExecutionWorker(QThread):
                 run, results = self._execution_service.rerun_failed(
                     self._rerun_failed_run_id,
                     headed=self._headed,
+                    extra_env=self._extra_env,
                     cancel_event=self._cancel_event,
                     on_event=_on_event,
                 )
@@ -224,6 +227,7 @@ class TestExecutionWorker(QThread):
                     self._definition_ids,
                     self._mode,
                     headed=self._headed,
+                    extra_env=self._extra_env,
                     cancel_event=self._cancel_event,
                     on_event=_on_event,
                 )
@@ -231,6 +235,7 @@ class TestExecutionWorker(QThread):
                 run, results = self._execution_service.run_journey(
                     self._session_id,
                     headed=self._headed,
+                    extra_env=self._extra_env,
                     cancel_event=self._cancel_event,
                     on_event=_on_event,
                 )
@@ -238,6 +243,7 @@ class TestExecutionWorker(QThread):
                 run, results = self._execution_service.run_independent(
                     self._session_id,
                     headed=self._headed,
+                    extra_env=self._extra_env,
                     cancel_event=self._cancel_event,
                     on_event=_on_event,
                 )

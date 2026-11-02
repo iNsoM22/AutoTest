@@ -58,6 +58,7 @@ class ExecutionService:
         mode: ExecutionMode,
         *,
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
         on_event: ProgressCallback | None = None,
     ) -> tuple[TestRun, list[TestCaseResult]]:
@@ -102,16 +103,56 @@ class ExecutionService:
         ]
         self._execution_repo.create_results(initial_results)
 
-        completed_run, completed_results = self._runner.execute(
-            run,
-            selected,
-            initial_results,
-            base_url=project.base_url,
-            headed=headed,
-            cancel_event=cancel_event,
-            on_result_updated=self._execution_repo.update_result,
-            on_event=on_event,
+        effective_base_url = (
+            next(
+                (
+                    d.settings.base_url
+                    for d in selected
+                    if d.settings.base_url and d.settings.base_url != project.base_url
+                ),
+                "",
+            )
+            or project.base_url
+            or next((d.settings.base_url for d in selected if d.settings.base_url), "")
         )
+        effective_headed = headed or any(not d.settings.headless for d in selected)
+
+        try:
+            completed_run, completed_results = self._runner.execute(
+                run,
+                selected,
+                initial_results,
+                base_url=effective_base_url,
+                headed=effective_headed,
+                extra_env=extra_env,
+                cancel_event=cancel_event,
+                on_result_updated=self._execution_repo.update_result,
+                on_event=on_event,
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            for res in initial_results:
+                if res.status in (TestResultStatus.PENDING, TestResultStatus.RUNNING):
+                    res.status = TestResultStatus.ERROR
+                    res.error_message = error_text
+                    self._execution_repo.update_result(res)
+            run.status = RunStatus.FAILED
+            run.ended_at = datetime.now(UTC)
+            run.passed_count = sum(
+                1 for r in initial_results if r.status == TestResultStatus.PASSED
+            )
+            run.failed_count = sum(
+                1
+                for r in initial_results
+                if r.status in (TestResultStatus.FAILED, TestResultStatus.ERROR)
+            )
+            run.skipped_count = sum(
+                1 for r in initial_results if r.status == TestResultStatus.SKIPPED
+            )
+            run.summary = {"error": error_text}
+            self._execution_repo.update_run(run)
+            raise
+
         self._execution_repo.update_run(completed_run)
         return completed_run, completed_results
 
@@ -120,6 +161,7 @@ class ExecutionService:
         definition_id: str,
         *,
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
         on_event: ProgressCallback | None = None,
     ) -> tuple[TestRun, list[TestCaseResult]]:
@@ -133,6 +175,7 @@ class ExecutionService:
             [defn.id],
             mode,
             headed=headed,
+            extra_env=extra_env,
             cancel_event=cancel_event,
             on_event=on_event,
         )
@@ -143,6 +186,7 @@ class ExecutionService:
         scenario_id: str,
         *,
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
         on_event: ProgressCallback | None = None,
     ) -> tuple[TestRun, list[TestCaseResult]]:
@@ -159,6 +203,7 @@ class ExecutionService:
             [d.id for d in defs],
             ExecutionMode.INDEPENDENT,
             headed=headed,
+            extra_env=extra_env,
             cancel_event=cancel_event,
             on_event=on_event,
         )
@@ -169,6 +214,7 @@ class ExecutionService:
         definition_ids: Sequence[str] | None = None,
         *,
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
         on_event: ProgressCallback | None = None,
     ) -> tuple[TestRun, list[TestCaseResult]]:
@@ -188,6 +234,7 @@ class ExecutionService:
             ids,
             ExecutionMode.INDEPENDENT,
             headed=headed,
+            extra_env=extra_env,
             cancel_event=cancel_event,
             on_event=on_event,
         )
@@ -197,6 +244,7 @@ class ExecutionService:
         session_id: str,
         *,
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
         on_event: ProgressCallback | None = None,
     ) -> tuple[TestRun, list[TestCaseResult]]:
@@ -211,6 +259,7 @@ class ExecutionService:
             [d.id for d in targets],
             ExecutionMode.JOURNEY,
             headed=headed,
+            extra_env=extra_env,
             cancel_event=cancel_event,
             on_event=on_event,
         )
@@ -220,6 +269,7 @@ class ExecutionService:
         run_id: str,
         *,
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
         on_event: ProgressCallback | None = None,
     ) -> tuple[TestRun, list[TestCaseResult]]:
@@ -241,6 +291,7 @@ class ExecutionService:
             failed_ids,
             previous.mode,
             headed=headed,
+            extra_env=extra_env,
             cancel_event=cancel_event,
             on_event=on_event,
         )

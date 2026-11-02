@@ -278,6 +278,7 @@ class ExecutionRunner:
         *,
         base_url: str = "",
         headed: bool = False,
+        extra_env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
         on_result_updated: Callable[[TestCaseResult], Any] | None = None,
         on_event: ProgressCallback | None = None,
@@ -317,6 +318,8 @@ class ExecutionRunner:
         cmd = self._build_pytest_command(pytest_args)
 
         env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
         existing_pypath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (
             f"{run_dir}{os.pathsep}{existing_pypath}" if existing_pypath else str(run_dir)
@@ -435,6 +438,7 @@ class ExecutionRunner:
                     proc.stdout.close()
 
         # Mark any unfinished tests if cancelled or if pytest exited early (e.g. collection error)
+        tail_log = "\n".join(log_lines[-80:]) if log_lines else ""
         for res in result_list:
             if res.status in (TestResultStatus.PENDING, TestResultStatus.RUNNING):
                 if cancelled:
@@ -443,6 +447,8 @@ class ExecutionRunner:
                 else:
                     res.status = TestResultStatus.ERROR
                     res.error_message = f"Test did not complete (pytest exit code {return_code})."
+                    if not res.traceback and tail_log:
+                        res.traceback = tail_log
                 if on_result_updated is not None:
                     on_result_updated(res)
 

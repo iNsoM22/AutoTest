@@ -513,13 +513,20 @@ def parse_selector_expression(expression: str) -> SelectorCandidate:
 
     if raw.startswith("role="):
         body = raw[len("role=") :].strip()
+        if not body:
+            raise ValueError("Selector value after 'role=' cannot be empty.")
         if "[name=" in body and body.endswith("]"):
             role_part, name_part = body.split("[name=", 1)
-            name_clean = name_part[:-1].strip().strip("'\"")
+            role_clean = role_part.strip()
+            if not role_clean:
+                raise ValueError("Role name in 'role=' selector cannot be empty.")
+            name_clean = name_part[:-1].strip()
+            if len(name_clean) >= 2 and name_clean[0] == name_clean[-1] and name_clean[0] in "'\"":
+                name_clean = name_clean[1:-1]
             return SelectorCandidate(
                 strategy=SelectorStrategy.ROLE,
-                value=f"{role_part.strip()}:{name_clean}",
-                role=role_part.strip(),
+                value=f"{role_clean}:{name_clean}",
+                role=role_clean,
                 name=name_clean,
                 confidence=0.95,
             )

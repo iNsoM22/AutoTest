@@ -510,16 +510,45 @@ class DefinitionsWidget(QWidget):
         if defn is None or not (0 <= row < len(defn.actions)):
             return
         action = defn.actions[row]
+        if action.action_type == ProcessedActionType.CHECK:
+            choice, ok = QInputDialog.getItem(
+                self,
+                "Edit Check State",
+                "Checked state:",
+                ["true", "false"],
+                0 if action.checked is not False else 1,
+                False,
+            )
+            if not ok:
+                return
+            try:
+                updated = self._definition_service.update_action(
+                    defn.id,
+                    action.id,
+                    checked=(choice == "true"),
+                )
+            except TestDefinitionError as exc:
+                QMessageBox.warning(self, "Could Not Update Step", str(exc))
+                return
+            self._reload_from_storage(select_definition_id=updated.id)
+            self.actions_table.selectRow(row)
+            return
+
         is_nav = action.action_type in (ProcessedActionType.NAVIGATE, ProcessedActionType.OPEN_TAB)
-        is_key = action.action_type == ProcessedActionType.PRESS_KEY
+        is_key = action.action_type in (ProcessedActionType.PRESS_KEY, ProcessedActionType.SUBMIT)
         if is_nav:
             current, label = action.url, "URL:"
         elif is_key:
-            current, label = action.key, "Key:"
+            current, label = action.key, "Key (leave empty to click/submit form):"
+        elif action.is_redacted:
+            current = ""
+            label = "Value (leave empty to keep redacted env var):"
         else:
             current, label = action.value, "Value:"
         new_val, ok = QInputDialog.getText(self, "Edit Step Value", label, text=current)
         if not ok:
+            return
+        if action.is_redacted and not is_nav and not is_key and not new_val:
             return
         try:
             if is_nav:
@@ -532,6 +561,7 @@ class DefinitionsWidget(QWidget):
             QMessageBox.warning(self, "Could Not Update Step", str(exc))
             return
         self._reload_from_storage(select_definition_id=updated.id)
+        self.actions_table.selectRow(row)
 
     def _on_move_action(self, delta: int) -> None:
         defn = self._current_definition()
@@ -545,6 +575,9 @@ class DefinitionsWidget(QWidget):
             QMessageBox.warning(self, "Could Not Move Step", str(exc))
             return
         self._reload_from_storage(select_definition_id=updated.id)
+        new_row = max(0, min(row + delta, self.actions_table.rowCount() - 1))
+        if self.actions_table.rowCount() > 0:
+            self.actions_table.selectRow(new_row)
 
     def _on_delete_action(self) -> None:
         defn = self._current_definition()
@@ -614,6 +647,32 @@ class DefinitionsWidget(QWidget):
         if defn is None or not (0 <= row < len(defn.assertions)):
             return
         assertion = defn.assertions[row]
+        if assertion.assertion_type == AssertionType.ELEMENT_VISIBLE:
+            current_sel = assertion.selector.display() if assertion.selector else ""
+            expr, ok = QInputDialog.getText(
+                self,
+                "Edit Assertion Selector",
+                "Element selector (e.g. test_id=banner, #status, text=Done):",
+                text=current_sel,
+            )
+            if not ok:
+                return
+            try:
+                parsed = parse_selector_expression(expr)
+                updated = self._definition_service.update_assertion(
+                    defn.id,
+                    assertion.id,
+                    selector=parsed,
+                    description=f"Verify {parsed.display()} is visible",
+                    needs_review=False,
+                )
+            except (ValueError, TestDefinitionError) as exc:
+                QMessageBox.warning(self, "Could Not Update Assertion", str(exc))
+                return
+            self._reload_from_storage(select_definition_id=updated.id)
+            self.assertions_table.selectRow(row)
+            return
+
         new_expected, ok = QInputDialog.getText(
             self,
             "Edit Assertion Expected Value",
@@ -622,17 +681,29 @@ class DefinitionsWidget(QWidget):
         )
         if not ok:
             return
+        cleaned = new_expected.strip()
+        new_desc = assertion.description
+        if assertion.assertion_type == AssertionType.TEXT_VISIBLE and cleaned:
+            new_desc = f"Verify '{cleaned}' is visible"
+        elif assertion.assertion_type in (AssertionType.URL_CONTAINS, AssertionType.URL_EQUALS):
+            new_desc = f"Verify URL matches '{cleaned}'"
+        elif assertion.assertion_type == AssertionType.ELEMENT_CHECKED and assertion.selector:
+            new_desc = f"Verify '{assertion.selector.display()}' checked={cleaned}"
+        elif assertion.assertion_type == AssertionType.ELEMENT_VALUE and assertion.selector:
+            new_desc = f"Verify '{assertion.selector.display()}' has value '{cleaned}'"
         try:
             updated = self._definition_service.update_assertion(
                 defn.id,
                 assertion.id,
-                expected=new_expected.strip(),
+                expected=cleaned,
+                description=new_desc,
                 needs_review=False,
             )
         except TestDefinitionError as exc:
             QMessageBox.warning(self, "Could Not Update Assertion", str(exc))
             return
         self._reload_from_storage(select_definition_id=updated.id)
+        self.assertions_table.selectRow(row)
 
     def _on_delete_assertion(self) -> None:
         defn = self._current_definition()

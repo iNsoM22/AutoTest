@@ -136,8 +136,9 @@ class TestDefinitionService:
         value: str | None = None,
         url: str | None = None,
         key: str | None = None,
+        checked: bool | None = None,
     ) -> TestDefinition:
-        """Edit an action's summary, selector, value, URL, or key."""
+        """Edit an action's summary, selector, value, URL, key, or checked state."""
         defn = self._require_definition(definition_id)
         new_actions = []
         found = False
@@ -156,6 +157,8 @@ class TestDefinitionService:
                     patch["url"] = url.strip()
                 if key is not None:
                     patch["key"] = key.strip()
+                if checked is not None:
+                    patch["checked"] = checked
                 new_actions.append(action.model_copy(update=patch))
             else:
                 new_actions.append(action)

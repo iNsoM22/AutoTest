@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
 
         self._projects: dict[str, Project] = {}
         self._selected_project_id: str | None = None
+        self._loaded_project_id: str | None = None
         self._active_session_id: str | None = None
         self._active_worker: BrowserSessionWorker | None = None
         self._tracked_pages: dict[str, PageInfo] = {}
@@ -386,6 +387,7 @@ class MainWindow(QMainWindow):
         self.project_list.setEnabled(not is_busy)
 
         if project is None:
+            self._loaded_project_id = None
             self.project_title_label.setText("No Project Selected")
             self.project_meta_label.setText(
                 "Create or select a project on the left to start a recording session."
@@ -396,14 +398,13 @@ class MainWindow(QMainWindow):
             self.sessions_table.setRowCount(0)
             self.delete_session_btn.setEnabled(False)
             self.review_session_btn.setEnabled(False)
-            self._clear_events_table()
-            if self.review_widget is not None:
-                self.review_widget.load_session(None)
-            if self.definitions_widget is not None:
-                self.definitions_widget.load_session(None)
-            if self.execution_widget is not None and not self.execution_widget.is_running:
-                self.execution_widget.load_session(None)
+            self._clear_session_tabs()
             return
+
+        project_changed = project.id != self._loaded_project_id
+        self._loaded_project_id = project.id
+        if project_changed and not is_busy:
+            self._clear_session_tabs()
 
         self.project_title_label.setText(project.name)
         meta_parts = [p for p in (project.base_url, project.description) if p]
@@ -413,6 +414,8 @@ class MainWindow(QMainWindow):
         self.start_url_input.setEnabled(not is_busy)
         self.record_toggle_btn.setEnabled(has_active_session or not self._is_execution_running())
         self._refresh_sessions(project.id)
+        if project_changed and not is_busy and self.sessions_table.rowCount() > 0:
+            self.sessions_table.selectRow(0)
 
     def _on_new_project(self) -> None:
         dialog = ProjectDialog(parent=self)
@@ -756,6 +759,17 @@ class MainWindow(QMainWindow):
             for page in pages
         }
         self._refresh_pages_table()
+
+    def _clear_session_tabs(self) -> None:
+        self._tracked_pages.clear()
+        self._refresh_pages_table()
+        self._clear_events_table()
+        if self.review_widget is not None:
+            self.review_widget.load_session(None)
+        if self.definitions_widget is not None:
+            self.definitions_widget.load_session(None)
+        if self.execution_widget is not None and not self.execution_widget.is_running:
+            self.execution_widget.load_session(None)
 
     def _clear_events_table(self) -> None:
         self._event_count = 0

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -23,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.definitions import TestDefinition, TestDefinitionService
+from src.definitions import TestDefinition, TestDefinitionService, TestMode
 from src.execution import (
     ExecutionError,
     ExecutionMode,
@@ -61,6 +62,7 @@ class ExecutionWidget(QWidget):
         self._worker: TestExecutionWorker | None = None
         self._active_run_session_id: str | None = None
         self._active_run_id: str | None = None
+        self._extra_env: dict[str, str] = {}
 
         self._build_ui()
         self._update_controls()
@@ -83,6 +85,9 @@ class ExecutionWidget(QWidget):
         self.headed_checkbox = QCheckBox("Headed", self)
         self.headed_checkbox.setChecked(False)
 
+        self.env_vars_btn = QPushButton("Env / Secrets", self)
+        self.env_vars_btn.clicked.connect(self._on_edit_env_vars)
+
         self.run_selected_btn = QPushButton("Run Selected", self)
         self.run_selected_btn.setObjectName("primaryButton")
         self.run_selected_btn.clicked.connect(self._on_run_selected)
@@ -102,6 +107,7 @@ class ExecutionWidget(QWidget):
 
         toolbar.addWidget(self.session_label, stretch=1)
         toolbar.addWidget(self.headed_checkbox)
+        toolbar.addWidget(self.env_vars_btn)
         toolbar.addWidget(self.run_selected_btn)
         toolbar.addWidget(self.run_independent_btn)
         toolbar.addWidget(self.run_journey_btn)
@@ -256,10 +262,16 @@ class ExecutionWidget(QWidget):
 
     def shutdown(self) -> None:
         """Cancel and wait for any active execution worker before window exit."""
-        if self._worker is not None:
-            self._worker.request_cancel()
-            self._worker.wait(5000)
-            self._worker = None
+        worker = self._worker
+        if worker is not None:
+            worker.request_cancel()
+            if not worker.wait(5000):
+                worker.wait(5000)
+            if not worker.isRunning():
+                worker.deleteLater()
+                self._worker = None
+                self._active_run_session_id = None
+                self._active_run_id = None
 
     def _populate_tests_list(self) -> None:
         self.tests_list.clear()
@@ -322,6 +334,7 @@ class ExecutionWidget(QWidget):
             mode=mode,
             rerun_failed_run_id=rerun_failed_run_id,
             headed=self.headed_checkbox.isChecked(),
+            extra_env=self._extra_env or None,
             parent=self,
         )
         worker.progress_event.connect(self._on_progress_event)
@@ -334,6 +347,29 @@ class ExecutionWidget(QWidget):
         self.execution_started.emit()
         worker.start()
 
+    def _on_edit_env_vars(self) -> None:
+        existing_text = "\n".join(f"{k}={v}" for k, v in self._extra_env.items())
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            "Execution Environment Variables / Test Secrets",
+            "Enter KEY=VALUE pairs (one per line, e.g. TEST_SECRET_STEP_2=my-secret):",
+            existing_text,
+        )
+        if not ok:
+            return
+        parsed: dict[str, str] = {}
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, val = stripped.split("=", 1)
+            key = key.strip()
+            if key:
+                parsed[key] = val.strip()
+        self._extra_env = parsed
+        count = len(parsed)
+        self.env_vars_btn.setText(f"Env / Secrets ({count})" if count else "Env / Secrets")
+
     def _on_run_selected(self) -> None:
         ids = self._selected_definition_ids()
         if not ids:
@@ -343,7 +379,14 @@ class ExecutionWidget(QWidget):
                 "Check at least one test in 'Tests in Session' to run.",
             )
             return
-        self._start_worker(definition_ids=ids, mode=ExecutionMode.INDEPENDENT)
+        by_id = {d.id: d for d in self._definitions}
+        selected_defs = [by_id[i] for i in ids if i in by_id]
+        mode = (
+            ExecutionMode.JOURNEY
+            if selected_defs and all(d.mode == TestMode.JOURNEY for d in selected_defs)
+            else ExecutionMode.INDEPENDENT
+        )
+        self._start_worker(definition_ids=ids, mode=mode)
 
     def _on_run_independent(self) -> None:
         self._start_worker(mode=ExecutionMode.INDEPENDENT)
@@ -439,7 +482,12 @@ class ExecutionWidget(QWidget):
         )
         log_path = self._execution_service.get_artifact_path(run.log_artifact_id)
         if log_path is not None:
-            self.live_log_view.setPlainText(log_path.read_text(encoding="utf-8", errors="replace"))
+            try:
+                self.live_log_view.setPlainText(
+                    log_path.read_text(encoding="utf-8", errors="replace")
+                )
+            except OSError as exc:
+                self.live_log_view.setPlainText(f"(Could not read execution log: {exc})")
         else:
             self.live_log_view.setPlainText("(No execution log available.)")
         self._update_controls()
@@ -554,3 +602,4 @@ class ExecutionWidget(QWidget):
         self.stop_btn.setEnabled(running)
         self.refresh_btn.setEnabled(has_session and not running)
         self.headed_checkbox.setEnabled(not running)
+        self.env_vars_btn.setEnabled(not running)

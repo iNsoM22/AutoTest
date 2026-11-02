@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import uuid
 from datetime import UTC, datetime
 
@@ -90,6 +91,7 @@ class ProjectService:
         deleted = self._repo.delete(project_id)
         if not deleted:
             raise ProjectNotFoundError(f"Project not found: {project_id}")
+        shutil.rmtree(self._artifacts.project_dir(project_id), ignore_errors=True)
         logger.info("Deleted project %s", project_id)
 
 
@@ -218,9 +220,14 @@ class SessionService:
         return count
 
     def delete_session(self, session_id: str) -> None:
-        deleted = self._sessions.delete(session_id)
-        if not deleted:
+        session = self._sessions.get(session_id)
+        if session is None:
             raise SessionNotFoundError(f"Recording session not found: {session_id}")
+        self._sessions.delete(session_id)
+        shutil.rmtree(
+            self._artifacts.session_dir(session.project_id, session_id),
+            ignore_errors=True,
+        )
         logger.info("Deleted recording session %s", session_id)
 
     def register_page(

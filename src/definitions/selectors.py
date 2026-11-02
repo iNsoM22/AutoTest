@@ -38,7 +38,7 @@ _TAG_TO_ROLE: dict[str, str] = {
 
 
 def _css_attr_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _css_id_selector(element_id: str) -> str:
@@ -200,10 +200,12 @@ def build_selector_candidates(
 
     alt_attr = str(target.get("alt", "")).strip()
     if alt_attr:
+        tag = str(target.get("tag", "")).strip().lower()
+        prefix = tag if tag in ("img", "area", "input") else ""
         _add(
             SelectorCandidate(
                 strategy=SelectorStrategy.CSS,
-                value=f'img[alt="{_css_attr_escape(alt_attr)}"]',
+                value=f'{prefix}[alt="{_css_attr_escape(alt_attr)}"]',
                 confidence=0.68,
             )
         )

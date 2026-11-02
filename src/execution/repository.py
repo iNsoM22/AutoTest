@@ -158,12 +158,32 @@ class ExecutionRepository:
                 """
                 UPDATE test_runs
                 SET status = ?,
-                    ended_at = COALESCE(ended_at, ?)
+                    ended_at = COALESCE(ended_at, ?),
+                    passed_count = (
+                        SELECT COUNT(*) FROM test_results
+                        WHERE run_id = test_runs.id AND status = ?
+                    ),
+                    failed_count = (
+                        SELECT COUNT(*) FROM test_results
+                        WHERE run_id = test_runs.id AND status IN (?, ?)
+                    ),
+                    skipped_count = (
+                        SELECT COUNT(*) FROM test_results
+                        WHERE run_id = test_runs.id AND status = ?
+                    ),
+                    total_count = (
+                        SELECT COUNT(*) FROM test_results
+                        WHERE run_id = test_runs.id
+                    )
                 WHERE status IN (?, ?);
                 """,
                 (
                     RunStatus.CANCELLED.value,
                     ts,
+                    TestResultStatus.PASSED.value,
+                    TestResultStatus.FAILED.value,
+                    TestResultStatus.ERROR.value,
+                    TestResultStatus.SKIPPED.value,
                     RunStatus.PENDING.value,
                     RunStatus.RUNNING.value,
                 ),

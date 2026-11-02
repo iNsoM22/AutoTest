@@ -99,21 +99,40 @@ def _needs_re_import(definitions: Sequence[TestDefinition]) -> bool:
     )
 
 
+_SELECTOR_ASSERTIONS = frozenset(
+    {
+        AssertionType.ELEMENT_VISIBLE,
+        AssertionType.ELEMENT_CHECKED,
+        AssertionType.ELEMENT_VALUE,
+    }
+)
+
+
 def _needs_expect_import(definitions: Sequence[TestDefinition]) -> bool:
-    return any(
-        a.enabled and a.assertion_type != AssertionType.NETWORK_RESPONSE
-        for d in definitions
-        for a in d.assertions
-    )
+    for d in definitions:
+        for a in d.assertions:
+            if not a.enabled or a.assertion_type == AssertionType.NETWORK_RESPONSE:
+                continue
+            if a.assertion_type in _SELECTOR_ASSERTIONS and a.selector is None:
+                continue
+            return True
+    return False
 
 
 class PytestPlaywrightGenerator:
     """Generates clean, standalone Python + Playwright + Pytest code with zero AutoTest imports."""
 
-    def render_test_function(self, definition: TestDefinition) -> str:
+    def render_test_function(
+        self,
+        definition: TestDefinition,
+        *,
+        function_name: str | None = None,
+    ) -> str:
         """Render a single Pytest test function body (without module-level imports)."""
         page_fixture = "authenticated_page" if _uses_auth_fixture(definition) else "page"
-        func_name = definition.function_name or slugify_test_function_name(definition.name)
+        func_name = (
+            function_name or definition.function_name or slugify_test_function_name(definition.name)
+        )
 
         lines: list[str] = [f"def {func_name}({page_fixture}: Page) -> None:"]
 
@@ -199,11 +218,19 @@ class PytestPlaywrightGenerator:
         lines.append(f"from playwright.sync_api import {', '.join(pw_symbols)}")
         lines.append("")
 
+        seen_names: set[str] = set()
         for idx, definition in enumerate(definitions):
+            base_name = definition.function_name or slugify_test_function_name(definition.name)
+            unique_name = base_name
+            suffix = 2
+            while unique_name in seen_names:
+                unique_name = f"{base_name}_{suffix}"
+                suffix += 1
+            seen_names.add(unique_name)
             if idx > 0:
                 lines.append("")
             lines.append("")
-            lines.append(self.render_test_function(definition))
+            lines.append(self.render_test_function(definition, function_name=unique_name))
 
         lines.append("")
         return "\n".join(lines)
@@ -220,8 +247,21 @@ class PytestPlaywrightGenerator:
             (d.settings.base_url for d in definitions if d.settings.base_url),
             "",
         )
-        width = definitions[0].settings.viewport_width if definitions else 1280
-        height = definitions[0].settings.viewport_height if definitions else 720
+        custom_viewport = next(
+            (
+                (d.settings.viewport_width, d.settings.viewport_height)
+                for d in definitions
+                if (d.settings.viewport_width, d.settings.viewport_height) != (1280, 720)
+            ),
+            None,
+        )
+        if custom_viewport is not None:
+            width, height = custom_viewport
+        elif definitions:
+            width = definitions[0].settings.viewport_width
+            height = definitions[0].settings.viewport_height
+        else:
+            width, height = 1280, 720
         needs_auth = any(_uses_auth_fixture(d) for d in definitions)
         auth_setup_def = (
             None if shared_browser_context else _find_auth_setup_definition(definitions)
@@ -257,9 +297,10 @@ class PytestPlaywrightGenerator:
                 "",
                 "",
                 '@pytest.fixture(scope="session")',
-                "def base_url() -> str:",
-                '    """Base URL for the app under test (override via BASE_URL env var)."""',
-                f'    return os.environ.get("BASE_URL", {resolved_base!r})',
+                "def base_url(pytestconfig: pytest.Config) -> str:",
+                '    """Base URL for the app under test (--base-url, BASE_URL env, or default)."""',
+                '    cli_url = pytestconfig.getoption("base_url", default="") or ""',
+                f'    return str(cli_url or os.environ.get("BASE_URL", {resolved_base!r}))',
                 "",
                 "",
                 '@pytest.fixture(scope="session")',
@@ -377,7 +418,8 @@ class PytestPlaywrightGenerator:
             "addopts = -v",
         ]
         if base_url:
-            lines.append(f"base_url = {base_url}")
+            escaped_base = base_url.replace("%", "%%")
+            lines.append(f"base_url = {escaped_base}")
         lines.append("")
         return GeneratedFile(
             filename="pytest.ini",
@@ -559,10 +601,14 @@ class PytestPlaywrightGenerator:
                 checked = assertion.expected.lower() != "false"
                 method = "to_be_checked" if checked else "not_to_be_checked"
                 lines.append(f"    expect({loc}).{method}()")
+            else:
+                lines.append(f"    # TODO: missing selector for assertion: {safe_desc}")
         elif atype == AssertionType.ELEMENT_VALUE:
             if assertion.selector is not None:
                 loc = _locator_expr(page_var, assertion.selector)
                 lines.append(f"    expect({loc}).to_have_value({assertion.expected!r})")
+            else:
+                lines.append(f"    # TODO: missing selector for assertion: {safe_desc}")
         elif atype == AssertionType.NETWORK_RESPONSE:
             safe_exp = _safe_comment_text(assertion.expected)
             lines.append(f"    # Network evidence ({safe_exp}): pair with a visible UI assertion.")
