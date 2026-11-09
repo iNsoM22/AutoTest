@@ -51,6 +51,7 @@ from src.ui.dialogs import ProjectDialog
 from src.ui.execution_widget import ExecutionWidget
 from src.ui.review_widget import ReviewWidget
 from src.ui.workers import BrowserManagerFactory, BrowserSessionWorker
+from src.utils import target_label
 
 logger = logging.getLogger(__name__)
 
@@ -522,17 +523,7 @@ class MainWindow(QMainWindow):
         session_id = str(item.data(Qt.ItemDataRole.UserRole))
         self._load_session_pages(session_id)
         self._load_session_events(session_id)
-        if self.review_widget is not None:
-            self.review_widget.load_session(session_id, item.text())
-        if self.definitions_widget is not None:
-            project = self._projects.get(self._selected_project_id or "")
-            self.definitions_widget.load_session(
-                session_id,
-                item.text(),
-                base_url=project.base_url if project is not None else "",
-            )
-        if self.execution_widget is not None:
-            self.execution_widget.load_session(session_id, item.text())
+        self._bind_session_tabs(session_id, item.text())
 
     def _on_review_selected_session(self) -> None:
         if self.review_widget is None:
@@ -547,17 +538,8 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         session_id = str(item.data(Qt.ItemDataRole.UserRole))
-        self.review_widget.load_session(session_id, item.text())
+        self._bind_session_tabs(session_id, item.text())
         self.review_widget.process_current_session()
-        if self.definitions_widget is not None:
-            project = self._projects.get(self._selected_project_id or "")
-            self.definitions_widget.load_session(
-                session_id,
-                item.text(),
-                base_url=project.base_url if project is not None else "",
-            )
-        if self.execution_widget is not None:
-            self.execution_widget.load_session(session_id, item.text())
         self.tabs.setCurrentWidget(self.review_widget)
 
     def _on_delete_session(self) -> None:
@@ -575,13 +557,7 @@ class MainWindow(QMainWindow):
         except ProjectError as exc:
             QMessageBox.warning(self, "Could Not Delete Session", str(exc))
             return
-        self._clear_events_table()
-        if self.review_widget is not None:
-            self.review_widget.load_session(None)
-        if self.definitions_widget is not None:
-            self.definitions_widget.load_session(None)
-        if self.execution_widget is not None:
-            self.execution_widget.load_session(None)
+        self._clear_session_tabs()
         self._refresh_sessions(self._selected_project_id)
 
     def _on_toggle_recording(self) -> None:
@@ -623,9 +599,9 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         worker.session_started.connect(self._on_worker_started)
-        worker.page_opened.connect(self._on_worker_page_opened)
-        worker.page_navigated.connect(self._on_worker_page_navigated)
-        worker.page_closed.connect(self._on_worker_page_closed)
+        worker.page_opened.connect(self._on_worker_page_updated)
+        worker.page_navigated.connect(self._on_worker_page_updated)
+        worker.page_closed.connect(self._on_worker_page_updated)
         worker.events_recorded.connect(self._on_worker_events_recorded)
         worker.session_finished.connect(self._on_worker_finished)
         worker.session_failed.connect(self._on_worker_failed)
@@ -658,20 +634,8 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(2)
         self.statusBar().showMessage("Chromium running — recording session active.")
 
-    def _on_worker_page_opened(self, _session_id: str, info_obj: object) -> None:
-        if not isinstance(info_obj, PageInfo):
-            return
-        self._tracked_pages[info_obj.page_id] = info_obj
-        self._refresh_pages_table()
-
-    def _on_worker_page_navigated(self, _session_id: str, info_obj: object) -> None:
-        if not isinstance(info_obj, PageInfo):
-            return
-        self._tracked_pages[info_obj.page_id] = info_obj
-        self._refresh_pages_table()
-
-    def _on_worker_page_closed(self, _session_id: str, info_obj: object) -> None:
-        if not isinstance(info_obj, PageInfo):
+    def _on_worker_page_updated(self, session_id: str, info_obj: object) -> None:
+        if session_id != self._active_session_id or not isinstance(info_obj, PageInfo):
             return
         self._tracked_pages[info_obj.page_id] = info_obj
         self._refresh_pages_table()
@@ -696,18 +660,12 @@ class MainWindow(QMainWindow):
         except ProjectError:
             logger.debug("Session %s already in terminal state", session_id)
         self._cleanup_worker()
-        if self.review_widget is not None:
-            self.review_widget.load_session(session_id)
-            if self._event_repository.count_by_session(session_id) > 0:
-                self.review_widget.process_current_session()
-        if self.definitions_widget is not None:
-            project = self._projects.get(self._selected_project_id or "")
-            self.definitions_widget.load_session(
-                session_id,
-                base_url=project.base_url if project is not None else "",
-            )
-        if self.execution_widget is not None and not self.execution_widget.is_running:
-            self.execution_widget.load_session(session_id)
+        self._bind_session_tabs(session_id)
+        if (
+            self.review_widget is not None
+            and self._event_repository.count_by_session(session_id) > 0
+        ):
+            self.review_widget.process_current_session()
         self._set_status_badge("Idle", "idle")
         self.statusBar().showMessage(
             f"Recording session stopped ({self._event_count} events captured).",
@@ -762,16 +720,24 @@ class MainWindow(QMainWindow):
         }
         self._refresh_pages_table()
 
+    def _bind_session_tabs(self, session_id: str | None, session_name: str = "") -> None:
+        if self.review_widget is not None:
+            self.review_widget.load_session(session_id, session_name)
+        if self.definitions_widget is not None:
+            project = self._projects.get(self._selected_project_id or "")
+            self.definitions_widget.load_session(
+                session_id,
+                session_name,
+                base_url=project.base_url if project is not None else "",
+            )
+        if self.execution_widget is not None and not self.execution_widget.is_running:
+            self.execution_widget.load_session(session_id, session_name)
+
     def _clear_session_tabs(self) -> None:
         self._tracked_pages.clear()
         self._refresh_pages_table()
         self._clear_events_table()
-        if self.review_widget is not None:
-            self.review_widget.load_session(None)
-        if self.definitions_widget is not None:
-            self.definitions_widget.load_session(None)
-        if self.execution_widget is not None and not self.execution_widget.is_running:
-            self.execution_widget.load_session(None)
+        self._bind_session_tabs(None)
 
     def _clear_events_table(self) -> None:
         self._event_count = 0
@@ -805,21 +771,13 @@ class MainWindow(QMainWindow):
         target = event.target
         payload = event.payload
         if target:
-            label = (
-                target.get("text")
-                or target.get("aria_label")
-                or target.get("test_id")
-                or target.get("id")
-                or target.get("name")
-                or target.get("css_path")
-                or target.get("tag", "")
-            )
+            label = target_label(target, default="")
             value = payload.get("value")
             if value is not None and value != "":
                 return f"{label} = {value}"
             if "key" in payload:
                 return f"{label} [{payload['key']}]"
-            return str(label)
+            return label
         if "status" in payload:
             return f"{payload.get('method', '')} {payload.get('status')} {payload.get('url', '')}"
         if "url" in payload:

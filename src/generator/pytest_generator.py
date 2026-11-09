@@ -515,7 +515,11 @@ class PytestPlaywrightGenerator:
 
         if atype == ProcessedActionType.SCROLL:
             coords = action.value.split(",", 1) if "," in action.value else []
-            if len(coords) == 2 and coords[0].strip().lstrip("-").isdigit() and coords[1].strip().lstrip("-").isdigit():
+            if (
+                len(coords) == 2
+                and coords[0].strip().lstrip("-").isdigit()
+                and coords[1].strip().lstrip("-").isdigit()
+            ):
                 sx, sy = int(coords[0].strip()), int(coords[1].strip())
                 lines.append(f"    {page_var}.evaluate('window.scrollTo({sx}, {sy})')")
             else:

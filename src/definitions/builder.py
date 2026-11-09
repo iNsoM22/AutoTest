@@ -28,8 +28,10 @@ from src.processing.models import (
     ProcessedEvent,
 )
 from src.scenarios.models import Scenario
+from src.utils import dedupe_preserve
 
 _AUTH_KEYWORDS = ("login", "log in", "sign in", "signin", "authenticate", "auth")
+_AUTH_FIELD_KEYWORDS = ("password", "passwd", "pwd", "passcode", "login", "signin", "auth")
 _REDACTED_MARKER = "[REDACTED]"
 _MODIFIER_KEY_MAP = {
     "ctrl": "Control",
@@ -37,16 +39,6 @@ _MODIFIER_KEY_MAP = {
     "shift": "Shift",
     "meta": "Meta",
 }
-
-
-def _dedupe_preserve(items: Sequence[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
 
 
 def _url_path_fragment(url: str) -> str:
@@ -59,12 +51,29 @@ def _url_path_fragment(url: str) -> str:
     return path
 
 
+def _is_auth_redacted_event(event: ProcessedEvent) -> bool:
+    if not (event.payload.get("redacted") or event.payload.get("value") == _REDACTED_MARKER):
+        return False
+    target = event.target
+    if str(target.get("input_type", "")).lower() == "password":
+        return True
+    autocomplete = str(target.get("autocomplete", "")).lower()
+    if "password" in autocomplete:
+        return True
+    if "cc-" in autocomplete:
+        return False
+    field_text = " ".join(
+        str(target.get(k, "")).lower() for k in ("name", "id", "aria_label", "placeholder")
+    )
+    return any(kw in field_text for kw in _AUTH_FIELD_KEYWORDS)
+
+
 def _looks_like_auth_scenario(scenario: Scenario, events: Sequence[ProcessedEvent]) -> bool:
     name_lower = scenario.name.lower()
     if any(kw in name_lower for kw in _AUTH_KEYWORDS):
         return True
     for event in events:
-        if event.payload.get("redacted") or event.payload.get("value") == _REDACTED_MARKER:
+        if _is_auth_redacted_event(event):
             return True
         url = str(event.payload.get("url", "")).lower()
         if any(kw in url for kw in ("/login", "/signin", "/auth")):
@@ -239,7 +248,7 @@ class TestDefinitionBuilder:
             for item in step_assertions:
                 all_raw_ids.extend(item.raw_event_ids)
 
-        return actions, assertions, _dedupe_preserve(all_raw_ids)
+        return actions, assertions, dedupe_preserve(all_raw_ids)
 
     def _build_action(self, event: ProcessedEvent, *, order_index: int) -> TestAction:
         effective_target = event.target
@@ -377,7 +386,7 @@ class TestDefinitionBuilder:
                         expected=fragment,
                         after_action_id=action.id,
                         evidence_summary="; ".join(evidence_parts),
-                        raw_event_ids=_dedupe_preserve(raw_ids),
+                        raw_event_ids=dedupe_preserve(raw_ids),
                     )
                 )
                 next_order += 1

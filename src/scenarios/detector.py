@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from src.processing.models import OutcomeType, ProcessedActionType, ProcessedEvent
 from src.scenarios.models import Scenario
+from src.utils import dedupe_preserve, target_label
 
 _USER_ACTION_TYPES = frozenset(
     {
@@ -37,14 +38,7 @@ def _nav_outcome_path(event: ProcessedEvent) -> str:
 
 
 def _collect_raw_ids(events: Sequence[ProcessedEvent]) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for event in events:
-        for raw_id in event.raw_event_ids:
-            if raw_id not in seen:
-                seen.add(raw_id)
-                ordered.append(raw_id)
-    return ordered
+    return dedupe_preserve([raw_id for event in events for raw_id in event.raw_event_ids])
 
 
 def _derive_scenario_name(events: Sequence[ProcessedEvent], index: int) -> str:
@@ -62,12 +56,7 @@ def _derive_scenario_name(events: Sequence[ProcessedEvent], index: int) -> str:
     # 2. Prefer a click that caused navigation or notable DOM change
     for event in reversed(events):
         if event.action_type == ProcessedActionType.CLICK and event.outcomes:
-            label = str(
-                event.target.get("text")
-                or event.target.get("aria_label")
-                or event.target.get("test_id")
-                or ""
-            ).strip()
+            label = target_label(event.target, default="")
             if label:
                 return f"Flow: {label}"
 

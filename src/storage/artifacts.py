@@ -74,6 +74,15 @@ class ArtifactManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _write_bytes(self, directory: Path, filename: str, content: bytes) -> tuple[Path, str]:
+        if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+            raise ValueError(f"Invalid artifact filename: {filename!r}")
+        target = (directory / filename).resolve()
+        if not target.is_relative_to(self._base_dir):
+            raise ValueError("Computed artifact file path escapes base directory.")
+        target.write_bytes(content)
+        return target, self.to_relative_path(target)
+
     def save_run_bytes(
         self,
         project_id: str,
@@ -83,14 +92,9 @@ class ArtifactManager:
         content: bytes,
     ) -> tuple[Path, str]:
         """Write bytes into a test run artifact directory and return `(path, relative_path)`."""
-        if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
-            raise ValueError(f"Invalid artifact filename: {filename!r}")
-        directory = self.ensure_run_dir(project_id, session_id, run_id)
-        target = (directory / filename).resolve()
-        if not target.is_relative_to(self._base_dir):
-            raise ValueError("Computed artifact file path escapes base directory.")
-        target.write_bytes(content)
-        return target, self.to_relative_path(target)
+        return self._write_bytes(
+            self.ensure_run_dir(project_id, session_id, run_id), filename, content
+        )
 
     def save_session_bytes(
         self,
@@ -100,14 +104,7 @@ class ArtifactManager:
         content: bytes,
     ) -> tuple[Path, str]:
         """Write bytes into a session artifact directory and return `(path, relative_path)`."""
-        if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
-            raise ValueError(f"Invalid artifact filename: {filename!r}")
-        directory = self.ensure_session_dir(project_id, session_id)
-        target = (directory / filename).resolve()
-        if not target.is_relative_to(self._base_dir):
-            raise ValueError("Computed artifact file path escapes base directory.")
-        target.write_bytes(content)
-        return target, self.to_relative_path(target)
+        return self._write_bytes(self.ensure_session_dir(project_id, session_id), filename, content)
 
     def resolve_path(self, relative_path: str) -> Path:
         """Resolve a stored relative artifact path and guard against path traversal."""

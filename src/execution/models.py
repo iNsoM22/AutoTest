@@ -88,10 +88,20 @@ class TestRun(BaseModel):
     log_artifact_id: str | None = None
 
 
+class ExecutionEventType(StrEnum):
+    """Structured progress event kinds emitted during test execution."""
+
+    RUN_STARTED = "run_started"
+    TEST_STARTED = "test_started"
+    TEST_FINISHED = "test_finished"
+    LOG = "log"
+    RUN_FINISHED = "run_finished"
+
+
 class ExecutionProgressEvent(BaseModel):
     """Live progress event emitted from the execution runner to observers/UI."""
 
-    event_type: str  # run_started | test_started | test_finished | log | run_finished
+    event_type: ExecutionEventType
     run_id: str
     function_name: str = ""
     status: str = ""

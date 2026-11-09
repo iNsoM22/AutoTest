@@ -16,6 +16,7 @@ from src.processing.models import (
     ProcessingResult,
 )
 from src.recording.models import EventType, RawEvent
+from src.utils import dedupe_preserve, target_label
 
 _STATIC_RESOURCE_TYPES = frozenset({"image", "font", "stylesheet", "media", "manifest", "other"})
 _INTERACTION_TYPES = frozenset(
@@ -43,13 +44,7 @@ def _ms_between(start: datetime, end: datetime) -> float:
 
 
 def _merge_ids(existing: list[str], extra: Sequence[str]) -> list[str]:
-    seen = set(existing)
-    merged = list(existing)
-    for item in extra:
-        if item not in seen:
-            seen.add(item)
-            merged.append(item)
-    return merged
+    return dedupe_preserve([*existing, *extra])
 
 
 def _target_key(target: dict[str, Any]) -> tuple[str, str, str, str, str]:
@@ -63,11 +58,7 @@ def _target_key(target: dict[str, Any]) -> tuple[str, str, str, str, str]:
 
 
 def _target_label(target: dict[str, Any]) -> str:
-    for key in ("text", "aria_label", "placeholder", "test_id", "name", "id", "css_path", "tag"):
-        val = target.get(key)
-        if val:
-            return str(val).strip()
-    return "element"
+    return target_label(target)
 
 
 def _short_url(url: str) -> str:

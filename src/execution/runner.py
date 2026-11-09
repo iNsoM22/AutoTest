@@ -19,6 +19,7 @@ from typing import Any
 
 from src.definitions.models import TestDefinition
 from src.execution.models import (
+    ExecutionEventType,
     ExecutionMode,
     ExecutionProgressEvent,
     RunStatus,
@@ -332,7 +333,7 @@ class ExecutionRunner:
         self._emit(
             on_event,
             ExecutionProgressEvent(
-                event_type="run_started",
+                event_type=ExecutionEventType.RUN_STARTED,
                 run_id=run.id,
                 status=run.status.value,
                 message=f"Starting {len(definitions)} test(s) in {run.mode.value} mode...",
@@ -403,7 +404,7 @@ class ExecutionRunner:
                         self._emit(
                             on_event,
                             ExecutionProgressEvent(
-                                event_type="log",
+                                event_type=ExecutionEventType.LOG,
                                 run_id=run.id,
                                 message=before,
                             ),
@@ -420,7 +421,7 @@ class ExecutionRunner:
                     self._emit(
                         on_event,
                         ExecutionProgressEvent(
-                            event_type="log",
+                            event_type=ExecutionEventType.LOG,
                             run_id=run.id,
                             message=stripped,
                         ),
@@ -503,7 +504,7 @@ class ExecutionRunner:
         self._emit(
             on_event,
             ExecutionProgressEvent(
-                event_type="run_finished",
+                event_type=ExecutionEventType.RUN_FINISHED,
                 run_id=run.id,
                 status=run.status.value,
                 duration_ms=run.duration_ms,
@@ -544,7 +545,7 @@ class ExecutionRunner:
             self._emit(
                 on_event,
                 ExecutionProgressEvent(
-                    event_type="test_started",
+                    event_type=ExecutionEventType.TEST_STARTED,
                     run_id=run.id,
                     function_name=func_name,
                     status=result.status.value,
@@ -593,7 +594,7 @@ class ExecutionRunner:
             self._emit(
                 on_event,
                 ExecutionProgressEvent(
-                    event_type="test_finished",
+                    event_type=ExecutionEventType.TEST_FINISHED,
                     run_id=run.id,
                     function_name=func_name,
                     status=result.status.value,

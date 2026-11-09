@@ -154,3 +154,64 @@ def test_main_window_displays_projects_and_runs_session_lifecycle(
     window.execution_widget.execution_finished.emit()
     assert window.delete_project_btn.isEnabled()
     assert window.record_toggle_btn.isEnabled()
+
+
+@pytest.mark.ui
+def test_project_switching_clears_tabs_and_session_reloads_pages(
+    qtbot: QtBot,
+    app_context: AppContext,
+) -> None:
+    p1 = app_context.project_service.create_project(
+        ProjectCreate(name="Alpha App", base_url="https://alpha.example.com")
+    )
+    p2 = app_context.project_service.create_project(
+        ProjectCreate(name="Beta App", base_url="https://beta.example.com")
+    )
+    s1 = app_context.session_service.create_session(p1.id, name="Alpha Session")
+    app_context.session_service.register_page(
+        s1.id,
+        page_id="pg-alpha-1",
+        tab_index=0,
+        url="https://alpha.example.com/home",
+        title="Alpha Home",
+    )
+
+    window = MainWindow(
+        app_context.settings,
+        app_context.project_service,
+        app_context.session_service,
+        app_context.event_repository,
+        scenario_service=app_context.scenario_service,
+        definition_service=app_context.definition_service,
+        copy_service=app_context.copy_service,
+        execution_service=app_context.execution_service,
+        browser_manager_factory=_FakeBrowserManager,
+    )
+    qtbot.addWidget(window)
+    window.show()
+
+    # Select Alpha App (find its row)
+    for idx in range(window.project_list.count()):
+        item = window.project_list.item(idx)
+        if item is not None and item.text() == "Alpha App":
+            window.project_list.setCurrentRow(idx)
+            break
+
+    # Session auto-selected -> pages_table reloaded from persisted browser_pages
+    assert window.pages_table.rowCount() == 1
+    assert window.pages_table.item(0, 1).text() == "Alpha Home"  # type: ignore[union-attr]
+
+    # Switch to Beta App (no sessions) -> all tabs cleared cleanly
+    for idx in range(window.project_list.count()):
+        item = window.project_list.item(idx)
+        if item is not None and item.text() == "Beta App":
+            window.project_list.setCurrentRow(idx)
+            break
+
+    assert window.project_title_label.text() == "Beta App"
+    assert window.sessions_table.rowCount() == 0
+    assert window.pages_table.rowCount() == 0
+    assert window.events_table.rowCount() == 0
+    assert window.execution_widget is not None
+    assert window.execution_widget.tests_list.count() == 0
+    assert p2.name == "Beta App"

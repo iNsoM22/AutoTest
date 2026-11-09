@@ -645,3 +645,241 @@ def test_teardown_failure(broken_teardown) -> None:
     assert "test_teardown_failure" in events
     assert events["test_teardown_failure"]["status"] == "error"
     assert "teardown boom" in str(events["test_teardown_failure"]["traceback"])
+
+
+def test_execution_service_marks_run_failed_on_runner_exception_and_recovery_counts(
+    tmp_settings: AppSettings,
+) -> None:
+    db, project_service, session_service, def_repo, exec_repo, exec_service, _artifacts = (
+        _setup_execution_stack(tmp_settings)
+    )
+    try:
+        project = project_service.create_project(ProjectCreate(name="ErrApp"))
+        session = session_service.create_session(project.id, name="ErrSession")
+        defn = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Boom Test",
+            function_name="test_boom",
+            mode=TestMode.INDEPENDENT,
+            order_index=1,
+            actions=[],
+            assertions=[],
+        )
+        def_repo.replace_for_session(session.id, [defn])
+
+        # Force runner to raise before completion
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("runner exploded")
+
+        exec_service._runner.execute = _boom  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="runner exploded"):
+            exec_service.run_single_test(defn.id)
+
+        runs = exec_repo.list_runs_by_session(session.id)
+        assert len(runs) == 1
+        assert runs[0].status == RunStatus.FAILED
+        assert runs[0].failed_count == 1
+        assert runs[0].ended_at is not None
+        res_list = exec_repo.list_results_by_run(runs[0].id)
+        assert res_list[0].status == TestResultStatus.ERROR
+        assert "runner exploded" in res_list[0].error_message
+
+        # Verify mark_interrupted_runs recomputes counts accurately
+        from src.execution.models import TestCaseResult, TestRun
+
+        interrupted = TestRun(
+            project_id=project.id,
+            session_id=session.id,
+            mode=ExecutionMode.INDEPENDENT,
+            status=RunStatus.RUNNING,
+            total_count=2,
+        )
+        exec_repo.create_run(interrupted)
+        exec_repo.create_results(
+            [
+                TestCaseResult(
+                    run_id=interrupted.id,
+                    function_name="test_one",
+                    test_name="One",
+                    status=TestResultStatus.PASSED,
+                    order_index=1,
+                ),
+                TestCaseResult(
+                    run_id=interrupted.id,
+                    function_name="test_two",
+                    test_name="Two",
+                    status=TestResultStatus.PENDING,
+                    order_index=2,
+                ),
+            ]
+        )
+        recovered = exec_service.recover_interrupted_runs()
+        assert recovered == 1
+        refreshed = exec_repo.get_run(interrupted.id)
+        assert refreshed is not None
+        assert refreshed.status == RunStatus.CANCELLED
+        assert refreshed.passed_count == 1
+        assert refreshed.skipped_count == 1
+        assert refreshed.failed_count == 0
+    finally:
+        db.close_all()
+
+
+@pytest.mark.browser
+def test_e2e_playwright_actions_assertions_and_secret_env(
+    tmp_settings: AppSettings,
+    tmp_path: Path,
+) -> None:
+    html_file = tmp_path / "rich_controls.html"
+    html_file.write_text(
+        """<!doctype html>
+<html>
+  <head><title>Rich Controls</title></head>
+  <body>
+    <form id="demo-form">
+      <input id="secret" data-testid="secret-in" type="password" />
+      <select id="plan" data-testid="plan-sel">
+        <option value="free">Free</option>
+        <option value="pro">Pro</option>
+      </select>
+      <input id="agree" data-testid="agree-chk" type="checkbox" />
+      <input id="note" data-testid="note-in" type="text" value="initial" />
+      <button id="hover-btn" data-testid="hover-btn" type="button"
+              onmouseover="document.getElementById('tip').textContent='Hovered!';">
+        Hover Me
+      </button>
+      <div id="tip" data-testid="tip-box"></div>
+      <div id="out" data-testid="out-box"></div>
+    </form>
+    <script>
+      document.getElementById("demo-form").addEventListener("submit", (e) => {
+        e.preventDefault();
+        const s = document.getElementById("secret").value;
+        const p = document.getElementById("plan").value;
+        document.getElementById("out").textContent = "Submitted:" + s + ":" + p;
+      });
+    </script>
+  </body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    page_url = html_file.as_uri()
+    db, project_service, session_service, def_repo, _exec_repo, exec_service, _artifacts = (
+        _setup_execution_stack(tmp_settings)
+    )
+    try:
+        project = project_service.create_project(ProjectCreate(name="RichApp", base_url=page_url))
+        session = session_service.create_session(project.id, name="RichSess", start_url=page_url)
+        defn = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Rich Controls Flow",
+            function_name="test_rich_controls_flow",
+            mode=TestMode.INDEPENDENT,
+            order_index=1,
+            actions=[
+                TestAction(
+                    order_index=1,
+                    action_type=ProcessedActionType.NAVIGATE,
+                    summary="Open page",
+                    url=page_url,
+                ),
+                TestAction(
+                    order_index=2,
+                    action_type=ProcessedActionType.FILL,
+                    summary="Fill secret",
+                    selector=SelectorCandidate(
+                        strategy=SelectorStrategy.TEST_ID, value="secret-in"
+                    ),
+                    is_redacted=True,
+                ),
+                TestAction(
+                    order_index=3,
+                    action_type=ProcessedActionType.SELECT,
+                    summary="Select Pro",
+                    selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="plan-sel"),
+                    value="pro",
+                ),
+                TestAction(
+                    order_index=4,
+                    action_type=ProcessedActionType.CHECK,
+                    summary="Check agree",
+                    selector=SelectorCandidate(
+                        strategy=SelectorStrategy.TEST_ID, value="agree-chk"
+                    ),
+                    checked=True,
+                ),
+                TestAction(
+                    order_index=5,
+                    action_type=ProcessedActionType.HOVER,
+                    summary="Hover button",
+                    selector=SelectorCandidate(
+                        strategy=SelectorStrategy.TEST_ID, value="hover-btn"
+                    ),
+                ),
+                TestAction(
+                    order_index=6,
+                    action_type=ProcessedActionType.PRESS_KEY,
+                    summary="Select all in note",
+                    selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="note-in"),
+                    key="Ctrl+a",
+                ),
+                TestAction(
+                    order_index=7,
+                    action_type=ProcessedActionType.SUBMIT,
+                    summary="Submit form",
+                    selector=SelectorCandidate(strategy=SelectorStrategy.CSS, value="#demo-form"),
+                    via_form_submit=True,
+                ),
+            ],
+            assertions=[
+                TestAssertion(
+                    order_index=1,
+                    assertion_type=AssertionType.URL_EQUALS,
+                    description="Exact URL",
+                    expected=page_url,
+                ),
+                TestAssertion(
+                    order_index=2,
+                    assertion_type=AssertionType.ELEMENT_CHECKED,
+                    description="Agree checked",
+                    selector=SelectorCandidate(
+                        strategy=SelectorStrategy.TEST_ID, value="agree-chk"
+                    ),
+                    expected="true",
+                ),
+                TestAssertion(
+                    order_index=3,
+                    assertion_type=AssertionType.ELEMENT_VALUE,
+                    description="Note has value",
+                    selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="note-in"),
+                    expected="initial",
+                ),
+                TestAssertion(
+                    order_index=4,
+                    assertion_type=AssertionType.ELEMENT_VISIBLE,
+                    description="Tip visible",
+                    selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="tip-box"),
+                ),
+                TestAssertion(
+                    order_index=5,
+                    assertion_type=AssertionType.TEXT_VISIBLE,
+                    description="Secret and plan submitted",
+                    expected="Submitted:s3cr3t:pro",
+                ),
+            ],
+            settings=TestExecutionSettings(timeout_ms=5000),
+        )
+        def_repo.replace_for_session(session.id, [defn])
+
+        run, results = exec_service.run_complete_suite(
+            session.id,
+            extra_env={"TEST_SECRET_STEP_2": "s3cr3t"},
+        )
+        assert run.status == RunStatus.PASSED
+        assert len(results) == 1
+        assert results[0].status == TestResultStatus.PASSED
+    finally:
+        db.close_all()
