@@ -92,11 +92,17 @@ class ExecutionWidget(QWidget):
         self.run_selected_btn.setObjectName("primaryButton")
         self.run_selected_btn.clicked.connect(self._on_run_selected)
 
+        self.run_scenario_btn = QPushButton("Run Scenario", self)
+        self.run_scenario_btn.clicked.connect(self._on_run_scenario)
+
         self.run_independent_btn = QPushButton("Run Independent", self)
         self.run_independent_btn.clicked.connect(self._on_run_independent)
 
         self.run_journey_btn = QPushButton("Run Journey", self)
         self.run_journey_btn.clicked.connect(self._on_run_journey)
+
+        self.run_suite_btn = QPushButton("Run Suite", self)
+        self.run_suite_btn.clicked.connect(self._on_run_complete_suite)
 
         self.rerun_failed_btn = QPushButton("Rerun Failed", self)
         self.rerun_failed_btn.clicked.connect(self._on_rerun_failed)
@@ -109,8 +115,10 @@ class ExecutionWidget(QWidget):
         toolbar.addWidget(self.headed_checkbox)
         toolbar.addWidget(self.env_vars_btn)
         toolbar.addWidget(self.run_selected_btn)
+        toolbar.addWidget(self.run_scenario_btn)
         toolbar.addWidget(self.run_independent_btn)
         toolbar.addWidget(self.run_journey_btn)
+        toolbar.addWidget(self.run_suite_btn)
         toolbar.addWidget(self.rerun_failed_btn)
         toolbar.addWidget(self.stop_btn)
         root.addLayout(toolbar)
@@ -314,6 +322,8 @@ class ExecutionWidget(QWidget):
         self,
         *,
         definition_ids: list[str] | None = None,
+        scenario_id: str | None = None,
+        complete_suite: bool = False,
         mode: ExecutionMode = ExecutionMode.INDEPENDENT,
         rerun_failed_run_id: str | None = None,
     ) -> None:
@@ -331,6 +341,8 @@ class ExecutionWidget(QWidget):
             self._execution_service,
             session_id=self._session_id,
             definition_ids=definition_ids,
+            scenario_id=scenario_id,
+            complete_suite=complete_suite,
             mode=mode,
             rerun_failed_run_id=rerun_failed_run_id,
             headed=self.headed_checkbox.isChecked(),
@@ -388,11 +400,34 @@ class ExecutionWidget(QWidget):
         )
         self._start_worker(definition_ids=ids, mode=mode)
 
+    def _on_run_scenario(self) -> None:
+        current_item = self.tests_list.currentItem()
+        if current_item is None:
+            QMessageBox.information(
+                self,
+                "No Scenario Selected",
+                "Highlight a scenario test in 'Tests in Session' first.",
+            )
+            return
+        def_id = str(current_item.data(Qt.ItemDataRole.UserRole))
+        defn = next((d for d in self._definitions if d.id == def_id), None)
+        if defn is None or defn.scenario_id is None:
+            QMessageBox.information(
+                self,
+                "Not a Scenario Test",
+                "Highlight an independent scenario test to run its scenario.",
+            )
+            return
+        self._start_worker(scenario_id=defn.scenario_id, mode=ExecutionMode.INDEPENDENT)
+
     def _on_run_independent(self) -> None:
         self._start_worker(mode=ExecutionMode.INDEPENDENT)
 
     def _on_run_journey(self) -> None:
         self._start_worker(mode=ExecutionMode.JOURNEY)
+
+    def _on_run_complete_suite(self) -> None:
+        self._start_worker(complete_suite=True, mode=ExecutionMode.INDEPENDENT)
 
     def _on_rerun_failed(self) -> None:
         if self._current_run is None:
@@ -544,6 +579,26 @@ class ExecutionWidget(QWidget):
             tb_parts.append(f"Error: {result.error_message}")
         if result.traceback:
             tb_parts.append(result.traceback)
+        matched_def = next(
+            (
+                d
+                for d in self._definitions
+                if (result.definition_id and d.id == result.definition_id)
+                or d.function_name == result.function_name
+            ),
+            None,
+        )
+        if matched_def is not None and matched_def.actions:
+            header = (
+                f"=== Step Breakdown ({matched_def.mode.value}: "
+                f"{len(matched_def.actions)} step(s)) ==="
+            )
+            step_lines = [header]
+            for action in matched_def.actions:
+                step_lines.append(
+                    f"  {action.order_index}. [{action.action_type.value}] {action.summary}"
+                )
+            tb_parts.append("\n".join(step_lines))
         if result.stdout:
             tb_parts.append(f"--- STDOUT ---\n{result.stdout}")
         if result.stderr:
@@ -596,8 +651,14 @@ class ExecutionWidget(QWidget):
         )
 
         self.run_selected_btn.setEnabled(has_session and has_defs and not running)
+        self.run_scenario_btn.setEnabled(
+            has_session
+            and any(d.scenario_id is not None for d in self._definitions)
+            and not running
+        )
         self.run_independent_btn.setEnabled(has_session and has_defs and not running)
         self.run_journey_btn.setEnabled(has_session and has_defs and not running)
+        self.run_suite_btn.setEnabled(has_session and has_defs and not running)
         self.rerun_failed_btn.setEnabled(can_rerun)
         self.stop_btn.setEnabled(running)
         self.refresh_btn.setEnabled(has_session and not running)

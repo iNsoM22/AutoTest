@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -32,6 +40,7 @@ from src.definitions import (
     TestDefinition,
     TestDefinitionError,
     TestDefinitionService,
+    TestExecutionSettings,
     parse_selector_expression,
 )
 from src.export import CopyExportService
@@ -102,11 +111,14 @@ class DefinitionsWidget(QWidget):
         def_btns = QHBoxLayout()
         self.rename_def_btn = QPushButton("Rename", left_pane)
         self.rename_def_btn.clicked.connect(self._on_rename_definition)
+        self.edit_details_btn = QPushButton("Settings", left_pane)
+        self.edit_details_btn.clicked.connect(self._on_edit_definition_settings)
         self.toggle_def_btn = QPushButton("Exclude", left_pane)
         self.toggle_def_btn.clicked.connect(self._on_toggle_definition_included)
         self.delete_def_btn = QPushButton("Delete", left_pane)
         self.delete_def_btn.clicked.connect(self._on_delete_definition)
         def_btns.addWidget(self.rename_def_btn)
+        def_btns.addWidget(self.edit_details_btn)
         def_btns.addWidget(self.toggle_def_btn)
         def_btns.addWidget(self.delete_def_btn)
 
@@ -258,12 +270,15 @@ class DefinitionsWidget(QWidget):
         self.copy_all_btn.clicked.connect(self._on_copy_all)
         self.copy_fixtures_btn = QPushButton("Copy Fixtures & Config", code_pane)
         self.copy_fixtures_btn.clicked.connect(self._on_copy_fixtures)
+        self.export_suite_btn = QPushButton("Export Suite...", code_pane)
+        self.export_suite_btn.clicked.connect(self._on_export_suite)
 
         copy_bar.addWidget(self.copy_test_btn)
         copy_bar.addWidget(self.copy_scenario_btn)
         copy_bar.addWidget(self.copy_selected_btn)
         copy_bar.addWidget(self.copy_all_btn)
         copy_bar.addWidget(self.copy_fixtures_btn)
+        copy_bar.addWidget(self.export_suite_btn)
         copy_bar.addStretch(1)
 
         code_layout.addLayout(code_header)
@@ -457,6 +472,73 @@ class DefinitionsWidget(QWidget):
             return
         self._reload_from_storage(select_definition_id=updated.id)
 
+    def _on_edit_definition_settings(self) -> None:
+        defn = self._current_definition()
+        if defn is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Test Settings — {defn.name}")
+        form = QFormLayout(dialog)
+
+        desc_input = QLineEdit(defn.description, dialog)
+        base_url_input = QLineEdit(defn.settings.base_url, dialog)
+        timeout_spin = QSpinBox(dialog)
+        timeout_spin.setRange(1000, 300000)
+        timeout_spin.setSingleStep(1000)
+        timeout_spin.setValue(defn.settings.timeout_ms)
+        width_spin = QSpinBox(dialog)
+        width_spin.setRange(320, 3840)
+        width_spin.setValue(defn.settings.viewport_width)
+        height_spin = QSpinBox(dialog)
+        height_spin.setRange(240, 2160)
+        height_spin.setValue(defn.settings.viewport_height)
+        headless_chk = QCheckBox("Run headless by default", dialog)
+        headless_chk.setChecked(defn.settings.headless)
+        prereq_text = (
+            "\n".join(f"- {p.name}: {p.description}" for p in defn.prerequisites)
+            if defn.prerequisites
+            else "(None)"
+        )
+        prereq_label = QLabel(prereq_text, dialog)
+        prereq_label.setWordWrap(True)
+
+        form.addRow("Description:", desc_input)
+        form.addRow("Base URL:", base_url_input)
+        form.addRow("Timeout (ms):", timeout_spin)
+        form.addRow("Viewport Width:", width_spin)
+        form.addRow("Viewport Height:", height_spin)
+        form.addRow("", headless_chk)
+        form.addRow("Prerequisites:", prereq_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_settings = TestExecutionSettings(
+            timeout_ms=timeout_spin.value(),
+            headless=headless_chk.isChecked(),
+            viewport_width=width_spin.value(),
+            viewport_height=height_spin.value(),
+            base_url=base_url_input.text().strip(),
+        )
+        try:
+            updated = self._definition_service.update_metadata(
+                defn.id,
+                description=desc_input.text().strip(),
+                settings=new_settings,
+            )
+        except TestDefinitionError as exc:
+            QMessageBox.warning(self, "Could Not Update Settings", str(exc))
+            return
+        self._reload_from_storage(select_definition_id=updated.id)
+
     def _on_toggle_definition_included(self) -> None:
         defn = self._current_definition()
         if defn is None:
@@ -616,22 +698,86 @@ class DefinitionsWidget(QWidget):
         defn = self._current_definition()
         if defn is None:
             return
-        text, ok = QInputDialog.getText(
+        type_choices = [
+            AssertionType.TEXT_VISIBLE.value,
+            AssertionType.URL_CONTAINS.value,
+            AssertionType.URL_EQUALS.value,
+            AssertionType.ELEMENT_VISIBLE.value,
+            AssertionType.ELEMENT_CHECKED.value,
+            AssertionType.ELEMENT_VALUE.value,
+        ]
+        chosen, ok = QInputDialog.getItem(
             self,
-            "Add Visible Text Assertion",
-            "Expected visible text:",
+            "Add Assertion",
+            "Assertion type:",
+            type_choices,
+            0,
+            False,
         )
-        if not ok or not text.strip():
+        if not ok:
             return
-        cleaned = text.strip()
+        atype = AssertionType(chosen)
+        selector = None
+        expected = ""
+
+        if atype in (
+            AssertionType.ELEMENT_VISIBLE,
+            AssertionType.ELEMENT_CHECKED,
+            AssertionType.ELEMENT_VALUE,
+        ):
+            expr, ok_sel = QInputDialog.getText(
+                self,
+                "Assertion Element Selector",
+                "Selector (e.g. test_id=banner, #status, text=Done):",
+            )
+            if not ok_sel or not expr.strip():
+                return
+            try:
+                selector = parse_selector_expression(expr)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Selector", str(exc))
+                return
+
+        if atype == AssertionType.ELEMENT_CHECKED:
+            val, ok_val = QInputDialog.getItem(
+                self, "Expected Checked State", "Checked:", ["true", "false"], 0, False
+            )
+            if not ok_val:
+                return
+            expected = val
+            description = f"Verify '{selector.display() if selector else 'element'}' checked={val}"
+        elif atype == AssertionType.ELEMENT_VISIBLE:
+            description = f"Verify {selector.display() if selector else 'element'} is visible"
+        else:
+            prompt_label = {
+                AssertionType.TEXT_VISIBLE: "Expected visible text:",
+                AssertionType.URL_CONTAINS: "Expected URL fragment:",
+                AssertionType.URL_EQUALS: "Expected exact URL:",
+                AssertionType.ELEMENT_VALUE: "Expected element value:",
+            }.get(atype, "Expected value:")
+            text, ok_val = QInputDialog.getText(self, "Expected Value", prompt_label)
+            if not ok_val or not text.strip():
+                return
+            expected = text.strip()
+            if atype == AssertionType.TEXT_VISIBLE:
+                description = f"Verify '{expected}' is visible"
+            elif atype in (AssertionType.URL_CONTAINS, AssertionType.URL_EQUALS):
+                description = f"Verify URL matches '{expected}'"
+            else:
+                description = (
+                    f"Verify '{selector.display() if selector else 'element'}' "
+                    f"has value '{expected}'"
+                )
+
         assertion = TestAssertion(
             order_index=len(defn.assertions) + 1,
-            assertion_type=AssertionType.TEXT_VISIBLE,
+            assertion_type=atype,
             confidence=AssertionConfidence.DIRECTLY_OBSERVED,
             needs_review=False,
             enabled=True,
-            description=f"Verify '{cleaned}' is visible",
-            expected=cleaned,
+            description=description,
+            selector=selector,
+            expected=expected,
             evidence_summary="Added manually during review.",
         )
         try:
@@ -760,6 +906,23 @@ class DefinitionsWidget(QWidget):
         )
         self._copy_to_clipboard(code, "fixtures & pytest.ini")
 
+    def _on_export_suite(self) -> None:
+        if not self._definitions:
+            return
+        target_dir = QFileDialog.getExistingDirectory(self, "Export Standalone Pytest Suite")
+        if not target_dir:
+            return
+        try:
+            written = self._copy_service.export_suite_to_dir(
+                self._definitions,
+                Path(target_dir),
+                base_url=self._base_url,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))
+            return
+        self.copy_status_label.setText(f"Exported {len(written)} file(s) to {target_dir}.")
+
     def _update_controls(self) -> None:
         has_session = self._session_id is not None
         selected = self._selected_definitions()
@@ -769,6 +932,7 @@ class DefinitionsWidget(QWidget):
         self.generate_btn.setEnabled(has_session)
         self.include_journey_checkbox.setEnabled(has_session)
         self.rename_def_btn.setEnabled(single)
+        self.edit_details_btn.setEnabled(single)
         self.toggle_def_btn.setEnabled(single)
         self.delete_def_btn.setEnabled(single)
         if defn is not None:
@@ -798,3 +962,4 @@ class DefinitionsWidget(QWidget):
         self.copy_selected_btn.setEnabled(bool(selected))
         self.copy_all_btn.setEnabled(any(d.included for d in self._definitions))
         self.copy_fixtures_btn.setEnabled(bool(self._definitions))
+        self.export_suite_btn.setEnabled(any(d.included for d in self._definitions))

@@ -264,6 +264,29 @@ class ExecutionService:
             on_event=on_event,
         )
 
+    def run_complete_suite(
+        self,
+        session_id: str,
+        *,
+        headed: bool = False,
+        extra_env: dict[str, str] | None = None,
+        cancel_event: threading.Event | None = None,
+        on_event: ProgressCallback | None = None,
+    ) -> tuple[TestRun, list[TestCaseResult]]:
+        """Run all included test definitions (independent + journey) for a session."""
+        included = [d for d in self._definition_repo.list_by_session(session_id) if d.included]
+        if not included:
+            raise ExecutionError("No included tests available for this session.")
+        return self.execute_definitions(
+            session_id,
+            [d.id for d in included],
+            ExecutionMode.INDEPENDENT,
+            headed=headed,
+            extra_env=extra_env,
+            cancel_event=cancel_event,
+            on_event=on_event,
+        )
+
     def rerun_failed(
         self,
         run_id: str,

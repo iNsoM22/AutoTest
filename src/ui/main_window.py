@@ -698,6 +698,8 @@ class MainWindow(QMainWindow):
         self._cleanup_worker()
         if self.review_widget is not None:
             self.review_widget.load_session(session_id)
+            if self._event_repository.count_by_session(session_id) > 0:
+                self.review_widget.process_current_session()
         if self.definitions_widget is not None:
             project = self._projects.get(self._selected_project_id or "")
             self.definitions_widget.load_session(

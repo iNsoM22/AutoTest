@@ -142,10 +142,16 @@ class PytestPlaywrightGenerator:
         if definition.description:
             doc_lines.append("")
             doc_lines.append(f"    {_safe_doc_text(definition.description)}")
+        if definition.scenario_id:
+            doc_lines.append("")
+            doc_lines.append(f"    Scenario ID: {_safe_doc_text(definition.scenario_id)}")
         if definition.raw_event_ids:
+            preview_ids = ", ".join(definition.raw_event_ids[:8])
+            suffix = ", ..." if len(definition.raw_event_ids) > 8 else ""
             doc_lines.append("")
             doc_lines.append(
-                f"    Traceability: derived from {len(definition.raw_event_ids)} raw event(s)."
+                f"    Traceability: derived from {len(definition.raw_event_ids)} raw event(s) "
+                f"[{preview_ids}{suffix}]."
             )
         doc_lines.append('    """')
         lines.extend(doc_lines)
@@ -173,9 +179,14 @@ class PytestPlaywrightGenerator:
             assertions_by_action.setdefault(assertion.after_action_id, []).append(assertion)
 
         emitted_body = False
+        has_opened_tab = False
         for action in definition.actions:
             emitted_body = True
-            lines.extend(self._render_action(action, page_fixture))
+            if action.action_type == ProcessedActionType.OPEN_TAB:
+                has_opened_tab = True
+            lines.extend(self._render_action(action, page_fixture, has_opened_tab=has_opened_tab))
+            if action.action_type == ProcessedActionType.CLOSE_TAB and has_opened_tab:
+                has_opened_tab = False
             for assertion in assertions_by_action.pop(action.id, []):
                 lines.extend(self._render_assertion(assertion, page_fixture))
 
@@ -474,7 +485,13 @@ class PytestPlaywrightGenerator:
             test_files=test_files,
         )
 
-    def _render_action(self, action: TestAction, page_var: str) -> list[str]:
+    def _render_action(
+        self,
+        action: TestAction,
+        page_var: str,
+        *,
+        has_opened_tab: bool = False,
+    ) -> list[str]:
         lines: list[str] = []
         atype = action.action_type
 
@@ -484,17 +501,25 @@ class PytestPlaywrightGenerator:
             return lines
 
         if atype == ProcessedActionType.OPEN_TAB:
+            lines.append(f"    new_page = {page_var}.context.new_page()")
             if action.url and action.url != "about:blank":
-                lines.append(f"    # Opened tab: {_safe_comment_text(action.url)}")
-                lines.append(f"    {page_var}.goto({action.url!r})")
+                lines.append(f"    new_page.goto({action.url!r})")
             return lines
 
         if atype == ProcessedActionType.CLOSE_TAB:
-            lines.append(f"    # Recorded tab close: {_safe_comment_text(action.summary)}")
+            if has_opened_tab:
+                lines.append("    new_page.close()")
+            else:
+                lines.append(f"    # Recorded tab close: {_safe_comment_text(action.summary)}")
             return lines
 
         if atype == ProcessedActionType.SCROLL:
-            lines.append(f"    # {_safe_comment_text(action.summary)}")
+            coords = action.value.split(",", 1) if "," in action.value else []
+            if len(coords) == 2 and coords[0].strip().lstrip("-").isdigit() and coords[1].strip().lstrip("-").isdigit():
+                sx, sy = int(coords[0].strip()), int(coords[1].strip())
+                lines.append(f"    {page_var}.evaluate('window.scrollTo({sx}, {sy})')")
+            else:
+                lines.append(f"    # {_safe_comment_text(action.summary)}")
             return lines
 
         locator = _locator_expr(page_var, action.selector) if action.selector else None

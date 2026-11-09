@@ -62,6 +62,7 @@ class PageInfo(BaseModel):
     url: str = ""
     title: str = ""
     is_closed: bool = False
+    navigation_type: str = ""
 
 
 @dataclass(slots=True)

@@ -186,6 +186,8 @@ class TestExecutionWorker(QThread):
         *,
         session_id: str,
         definition_ids: list[str] | None = None,
+        scenario_id: str | None = None,
+        complete_suite: bool = False,
         mode: ExecutionMode = ExecutionMode.INDEPENDENT,
         rerun_failed_run_id: str | None = None,
         headed: bool = False,
@@ -196,6 +198,8 @@ class TestExecutionWorker(QThread):
         self._execution_service = execution_service
         self._session_id = session_id
         self._definition_ids = definition_ids
+        self._scenario_id = scenario_id
+        self._complete_suite = complete_suite
         self._mode = mode
         self._rerun_failed_run_id = rerun_failed_run_id
         self._headed = headed
@@ -216,6 +220,23 @@ class TestExecutionWorker(QThread):
             if self._rerun_failed_run_id is not None:
                 run, results = self._execution_service.rerun_failed(
                     self._rerun_failed_run_id,
+                    headed=self._headed,
+                    extra_env=self._extra_env,
+                    cancel_event=self._cancel_event,
+                    on_event=_on_event,
+                )
+            elif self._scenario_id is not None:
+                run, results = self._execution_service.run_scenario(
+                    self._session_id,
+                    self._scenario_id,
+                    headed=self._headed,
+                    extra_env=self._extra_env,
+                    cancel_event=self._cancel_event,
+                    on_event=_on_event,
+                )
+            elif self._complete_suite:
+                run, results = self._execution_service.run_complete_suite(
+                    self._session_id,
                     headed=self._headed,
                     extra_env=self._extra_env,
                     cancel_event=self._cancel_event,

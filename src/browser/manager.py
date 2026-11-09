@@ -229,19 +229,30 @@ class BrowserManager:
     def _handle_frame_navigated(self, page_id: str, page: Page, frame: Frame) -> None:
         if frame != page.main_frame:
             return
-        self._sync_page_info(page_id, page, notify=True)
+        self._sync_page_info(page_id, page, notify=True, force_notify=True)
 
     def _handle_page_load(self, page_id: str, page: Page) -> None:
-        self._sync_page_info(page_id, page, notify=True)
+        self._sync_page_info(page_id, page, notify=True, force_notify=False)
 
-    def _sync_page_info(self, page_id: str, page: Page, *, notify: bool) -> PageInfo:
+    def _sync_page_info(
+        self,
+        page_id: str,
+        page: Page,
+        *,
+        notify: bool,
+        force_notify: bool = False,
+    ) -> PageInfo:
         current = self._page_info[page_id]
         new_url = page.url or current.url
         new_title = self._safe_title(page) or current.title
-        if new_url == current.url and new_title == current.title:
+        is_reload = force_notify and bool(current.url) and new_url == current.url
+        if not force_notify and new_url == current.url and new_title == current.title:
             return current
 
-        updated = current.model_copy(update={"url": new_url, "title": new_title})
+        nav_type = "reload" if is_reload else "navigate"
+        updated = current.model_copy(
+            update={"url": new_url, "title": new_title, "navigation_type": nav_type}
+        )
         self._page_info[page_id] = updated
         if notify and self._callbacks.on_page_navigated is not None:
             self._callbacks.on_page_navigated(updated)

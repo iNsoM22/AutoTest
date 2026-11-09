@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.processing import ProcessedEvent, ProcessingResult
+from src.processing import CorrelatedOutcome, ProcessedEvent, ProcessingResult
 from src.scenarios import Scenario, ScenarioError, ScenarioService
 from src.ui.workers import SessionProcessingWorker
 
@@ -45,6 +45,7 @@ class ReviewWidget(QWidget):
         self._scenarios: list[Scenario] = []
         self._timeline: list[ProcessedEvent] = []
         self._visible_events: list[ProcessedEvent] = []
+        self._uncorrelated_outcomes: list[CorrelatedOutcome] = []
         self._worker: SessionProcessingWorker | None = None
 
         self._build_ui()
@@ -143,9 +144,9 @@ class ReviewWidget(QWidget):
         timeline_title = QLabel("Correlated Timeline", timeline_pane)
         timeline_title.setObjectName("sectionTitle")
 
-        self.timeline_table = QTableWidget(0, 5, timeline_pane)
+        self.timeline_table = QTableWidget(0, 6, timeline_pane)
         self.timeline_table.setHorizontalHeaderLabels(
-            ["#", "Action", "Summary", "Correlated Outcomes", "Evidence"]
+            ["#", "Time", "Action", "Summary", "Correlated Outcomes", "Evidence"]
         )
         self.timeline_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.timeline_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -157,13 +158,16 @@ class ReviewWidget(QWidget):
             1, QHeaderView.ResizeMode.ResizeToContents
         )
         self.timeline_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Stretch
+            2, QHeaderView.ResizeMode.ResizeToContents
         )
         self.timeline_table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
         )
         self.timeline_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.ResizeToContents
+            4, QHeaderView.ResizeMode.Stretch
+        )
+        self.timeline_table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.ResizeToContents
         )
         self.timeline_table.verticalHeader().setVisible(False)
         self.timeline_table.itemSelectionChanged.connect(self._on_timeline_selection_changed)
@@ -207,6 +211,7 @@ class ReviewWidget(QWidget):
             self._scenarios = []
             self._timeline = []
             self._visible_events = []
+            self._uncorrelated_outcomes = []
             self.scenarios_list.clear()
             self.timeline_table.setRowCount(0)
             self.evidence_inspector.clear()
@@ -251,12 +256,18 @@ class ReviewWidget(QWidget):
         scenarios: list[Scenario] = scenarios_obj
         self._timeline = result_obj.processed_events
         self._scenarios = scenarios
+        self._uncorrelated_outcomes = list(result_obj.uncorrelated_outcomes)
         self._render_scenarios(select_index=0 if scenarios else -1)
         self._refresh_timeline_table()
+        uncorr_note = (
+            f", {len(self._uncorrelated_outcomes)} uncorrelated"
+            if self._uncorrelated_outcomes
+            else ""
+        )
         self.summary_label.setText(
             f"{self._session_name or self._session_id[:8]}: "
             f"{result_obj.raw_event_count} raw -> {len(result_obj.processed_events)} steps -> "
-            f"{len(scenarios)} scenario(s) ({result_obj.dropped_count} filtered)"
+            f"{len(scenarios)} scenario(s) ({result_obj.dropped_count} filtered{uncorr_note})"
         )
         self._update_controls()
         self.scenarios_changed.emit(self._session_id)
@@ -345,14 +356,34 @@ class ReviewWidget(QWidget):
         for row_idx, event in enumerate(events):
             outcomes_text = "; ".join(o.summary for o in event.outcomes) if event.outcomes else "-"
             evidence_text = f"{len(event.raw_event_ids)} raw"
+            time_text = event.started_at.strftime("%H:%M:%S.%f")[:-3]
             self.timeline_table.setItem(row_idx, 0, QTableWidgetItem(str(event.order_index)))
-            self.timeline_table.setItem(row_idx, 1, QTableWidgetItem(event.action_type.value))
-            self.timeline_table.setItem(row_idx, 2, QTableWidgetItem(event.summary))
-            self.timeline_table.setItem(row_idx, 3, QTableWidgetItem(outcomes_text))
-            self.timeline_table.setItem(row_idx, 4, QTableWidgetItem(evidence_text))
+            self.timeline_table.setItem(row_idx, 1, QTableWidgetItem(time_text))
+            self.timeline_table.setItem(row_idx, 2, QTableWidgetItem(event.action_type.value))
+            self.timeline_table.setItem(row_idx, 3, QTableWidgetItem(event.summary))
+            self.timeline_table.setItem(row_idx, 4, QTableWidgetItem(outcomes_text))
+            self.timeline_table.setItem(row_idx, 5, QTableWidgetItem(evidence_text))
 
-        self.evidence_inspector.clear()
+        self._render_default_inspector()
         self._update_controls()
+
+    def _render_default_inspector(self) -> None:
+        if self._uncorrelated_outcomes:
+            payload = {
+                "uncorrelated_outcomes": [
+                    {
+                        "type": o.outcome_type.value,
+                        "summary": o.summary,
+                        "timestamp": o.timestamp.isoformat(),
+                        "details": o.details,
+                        "raw_event_ids": o.raw_event_ids,
+                    }
+                    for o in self._uncorrelated_outcomes
+                ]
+            }
+            self.evidence_inspector.setPlainText(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            self.evidence_inspector.clear()
 
     def _on_timeline_selection_changed(self) -> None:
         row = self.timeline_table.currentRow()
@@ -362,6 +393,8 @@ class ReviewWidget(QWidget):
                 "step_id": event.id,
                 "action_type": event.action_type.value,
                 "summary": event.summary,
+                "started_at": event.started_at.isoformat(),
+                "ended_at": event.ended_at.isoformat(),
                 "page_id": event.page_id,
                 "target": event.target,
                 "payload": event.payload,
@@ -369,6 +402,7 @@ class ReviewWidget(QWidget):
                     {
                         "type": o.outcome_type.value,
                         "summary": o.summary,
+                        "timestamp": o.timestamp.isoformat(),
                         "details": o.details,
                         "raw_event_ids": o.raw_event_ids,
                     }
@@ -378,7 +412,7 @@ class ReviewWidget(QWidget):
             }
             self.evidence_inspector.setPlainText(json.dumps(details, indent=2, ensure_ascii=False))
         else:
-            self.evidence_inspector.clear()
+            self._render_default_inspector()
         self._update_controls()
 
     def _on_rename_scenario(self) -> None:

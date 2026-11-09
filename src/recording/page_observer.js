@@ -139,6 +139,8 @@
       autocomplete: el.getAttribute("autocomplete") || "",
       test_id: testIdVal,
       test_id_attr: testIdAttr,
+      alt: el.getAttribute("alt") || "",
+      title: el.getAttribute("title") || "",
       href: el.getAttribute("href") || "",
     };
     for (const [k, v] of Object.entries(attrs)) {
@@ -326,12 +328,36 @@
     { passive: true, capture: true }
   );
 
+  // --- SPA back/forward & tab focus ---
+  window.addEventListener("popstate", () => {
+    send("navigation", { tag: "window" }, {
+      url: window.location ? window.location.href : "",
+      title: document.title || "",
+      navigation_type: "back_forward",
+    });
+  });
+
+  let wasHidden = false;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      wasHidden = true;
+    } else if (wasHidden) {
+      wasHidden = false;
+      send("navigation", { tag: "window" }, {
+        url: window.location ? window.location.href : "",
+        title: document.title || "",
+        navigation_type: "tab_switch",
+      });
+    }
+  });
+
   // --- Debounced / grouped DOM mutations ---
   let mutationTimer = null;
   let mutationSummary = {
     added_count: 0,
     removed_count: 0,
     attribute_changes: 0,
+    text_changes: 0,
     notable: [],
   };
 
@@ -403,12 +429,34 @@
     });
   }
 
+  function collectNotableText(node) {
+    const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+    if (!el || el.nodeType !== 1 || mutationSummary.notable.length >= 5) return;
+    if (!isElementVisible(el)) return;
+    const text = cleanText(el.innerText || el.textContent || "", 100);
+    if (!text) return;
+    const tag = el.tagName.toLowerCase();
+    const id = el.id || "";
+    const alreadyRecorded = mutationSummary.notable.some(
+      (item) => item.id === id && item.tag === tag && item.text === text
+    );
+    if (alreadyRecorded) return;
+    mutationSummary.notable.push({
+      tag,
+      role: el.getAttribute("role") || "",
+      id,
+      text,
+      mutation: "text",
+    });
+  }
+
   function flushMutations() {
     mutationTimer = null;
     if (
       mutationSummary.added_count === 0 &&
       mutationSummary.removed_count === 0 &&
-      mutationSummary.attribute_changes === 0
+      mutationSummary.attribute_changes === 0 &&
+      mutationSummary.text_changes === 0
     ) {
       return;
     }
@@ -417,6 +465,7 @@
       added_count: 0,
       removed_count: 0,
       attribute_changes: 0,
+      text_changes: 0,
       notable: [],
     };
     send("dom_mutation", { tag: "document" }, payload);
@@ -424,6 +473,29 @@
 
   function startMutationObserver() {
     if (!document.documentElement) return;
+    const observedRoots = new WeakSet();
+    const observerConfig = {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      attributeFilter: ["class", "hidden", "aria-expanded", "aria-hidden", "disabled", "open"],
+    };
+
+    function observeRoot(root) {
+      if (!root || observedRoots.has(root)) return;
+      observedRoots.add(root);
+      observer.observe(root, observerConfig);
+      if (typeof root.querySelectorAll === "function") {
+        for (const el of root.querySelectorAll("*")) {
+          if (el.shadowRoot) {
+            observeRoot(el.shadowRoot);
+          }
+        }
+      }
+    }
+
     const observer = new MutationObserver((records) => {
       for (const rec of records) {
         if (rec.type === "childList") {
@@ -431,23 +503,23 @@
           mutationSummary.removed_count += rec.removedNodes.length;
           for (const added of rec.addedNodes) {
             collectNotable(added);
+            if (added && added.nodeType === 1) {
+              if (added.shadowRoot) observeRoot(added.shadowRoot);
+            }
           }
         } else if (rec.type === "attributes") {
           mutationSummary.attribute_changes += 1;
           collectNotableAttribute(rec);
+        } else if (rec.type === "characterData") {
+          mutationSummary.text_changes += 1;
+          collectNotableText(rec.target);
         }
       }
       if (mutationTimer === null) {
         mutationTimer = setTimeout(flushMutations, 200);
       }
     });
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeOldValue: true,
-      attributeFilter: ["class", "hidden", "aria-expanded", "aria-hidden", "disabled", "open"],
-    });
+    observeRoot(document.documentElement);
   }
 
   if (document.documentElement) {

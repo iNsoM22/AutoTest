@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 import weakref
 from contextlib import suppress
@@ -23,7 +24,9 @@ class PlaywrightObserver:
 
     def __init__(self, collector: EventCollector) -> None:
         self._collector = collector
-        self._request_ids: weakref.WeakKeyDictionary[Request, str] = weakref.WeakKeyDictionary()
+        self._request_meta: weakref.WeakKeyDictionary[Request, tuple[str, float]] = (
+            weakref.WeakKeyDictionary()
+        )
 
     def record_tab_open(self, info: PageInfo) -> None:
         """Record a newly opened browser tab."""
@@ -40,15 +43,18 @@ class PlaywrightObserver:
 
     def record_navigation(self, info: PageInfo) -> None:
         """Record a main-frame URL/title navigation update."""
+        payload: dict[str, Any] = {
+            "tab_index": info.tab_index,
+            "url": info.url,
+            "title": info.title,
+        }
+        if info.navigation_type:
+            payload["navigation_type"] = info.navigation_type
         self._collector.record(
             event_type=EventType.NAVIGATION,
             source=EventSource.PLAYWRIGHT,
             page_id=info.page_id,
-            payload={
-                "tab_index": info.tab_index,
-                "url": info.url,
-                "title": info.title,
-            },
+            payload=payload,
         )
 
     def record_tab_close(self, info: PageInfo) -> None:
@@ -74,7 +80,7 @@ class PlaywrightObserver:
 
     def _on_request(self, page_id: str, request: Request) -> None:
         correlation_id = uuid.uuid4().hex
-        self._request_ids[request] = correlation_id
+        self._request_meta[request] = (correlation_id, time.monotonic())
         self._collector.record(
             event_type=EventType.REQUEST,
             source=EventSource.PLAYWRIGHT,
@@ -90,7 +96,9 @@ class PlaywrightObserver:
 
     def _on_response(self, page_id: str, response: Response) -> None:
         request = response.request
-        correlation_id = self._request_ids.pop(request, None)
+        meta = self._request_meta.pop(request, None)
+        correlation_id = meta[0] if meta is not None else None
+        duration_ms = max(0, int(round((time.monotonic() - meta[1]) * 1000))) if meta else 0
         content_type = ""
         with suppress(PlaywrightError):
             content_type = response.headers.get("content-type", "")
@@ -108,11 +116,14 @@ class PlaywrightObserver:
                 "ok": response.ok,
                 "resource_type": request.resource_type,
                 "content_type": content_type,
+                "duration_ms": duration_ms,
             },
         )
 
     def _on_request_failed(self, page_id: str, request: Request) -> None:
-        correlation_id = self._request_ids.pop(request, None)
+        meta = self._request_meta.pop(request, None)
+        correlation_id = meta[0] if meta is not None else None
+        duration_ms = max(0, int(round((time.monotonic() - meta[1]) * 1000))) if meta else 0
         self._collector.record(
             event_type=EventType.REQUEST_FAILED,
             source=EventSource.PLAYWRIGHT,
@@ -123,6 +134,7 @@ class PlaywrightObserver:
                 "url": request.url,
                 "resource_type": request.resource_type,
                 "failure": request.failure or "",
+                "duration_ms": duration_ms,
             },
         )
 

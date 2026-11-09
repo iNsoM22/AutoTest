@@ -275,6 +275,10 @@ class TestDefinitionBuilder:
                 if event.payload.get(m)
             ]
             key = "+".join([*mods, raw_key]) if mods and raw_key else raw_key
+        elif event.action_type == ProcessedActionType.SCROLL:
+            sx = int(event.payload.get("scroll_x", 0) or 0)
+            sy = int(event.payload.get("scroll_y", 0) or 0)
+            value = f"{sx},{sy}"
         elif event.action_type == ProcessedActionType.SUBMIT:
             key = str(event.payload.get("trigger_key", ""))
             has_trigger_target = isinstance(event.payload.get("trigger_target"), dict)
