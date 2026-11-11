@@ -121,6 +121,57 @@ class ScenarioRepository:
             )
         return scenario
 
+    def save_batch(
+        self,
+        *,
+        to_update: Sequence[Scenario] = (),
+        to_insert: Sequence[Scenario] = (),
+        to_delete_ids: Sequence[str] = (),
+    ) -> None:
+        """Atomically apply updates, inserts, and deletes without severing surviving FKs."""
+        with self._db.transaction() as conn:
+            for scenario_id in to_delete_ids:
+                conn.execute("DELETE FROM scenarios WHERE id = ?;", (scenario_id,))
+            if to_update:
+                conn.executemany(
+                    """
+                    UPDATE scenarios
+                    SET name = ?,
+                        description = ?,
+                        order_index = ?,
+                        included = ?,
+                        processed_event_ids_json = ?,
+                        raw_event_ids_json = ?,
+                        updated_at = ?
+                    WHERE id = ?;
+                    """,
+                    [
+                        (
+                            s.name,
+                            s.description,
+                            s.order_index,
+                            1 if s.included else 0,
+                            json.dumps(s.processed_event_ids, ensure_ascii=False),
+                            json.dumps(s.raw_event_ids, ensure_ascii=False),
+                            s.updated_at.isoformat(),
+                            s.id,
+                        )
+                        for s in to_update
+                    ],
+                )
+            if to_insert:
+                conn.executemany(
+                    """
+                    INSERT INTO scenarios (
+                        id, project_id, session_id, name, description, order_index,
+                        included, processed_event_ids_json, raw_event_ids_json,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    [self._to_row(s) for s in to_insert],
+                )
+
     def delete(self, scenario_id: str) -> bool:
         """Delete a scenario by ID."""
         with self._db.transaction() as conn:

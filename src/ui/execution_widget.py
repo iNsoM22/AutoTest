@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
@@ -58,11 +60,12 @@ class ExecutionWidget(QWidget):
         self._runs: list[TestRun] = []
         self._current_run: TestRun | None = None
         self._current_results: list[TestCaseResult] = []
-        self._results_by_func: dict[str, TestCaseResult] = {}
+        self._results_by_id: dict[str, TestCaseResult] = {}
         self._worker: TestExecutionWorker | None = None
         self._active_run_session_id: str | None = None
         self._active_run_id: str | None = None
         self._extra_env: dict[str, str] = {}
+        self._external_busy: bool = False
 
         self._build_ui()
         self._update_controls()
@@ -71,6 +74,12 @@ class ExecutionWidget(QWidget):
     def is_running(self) -> bool:
         """Return True while a background test execution worker is active."""
         return self._worker is not None
+
+    def set_external_busy(self, busy: bool) -> None:
+        """Lock/unlock execution controls while another tab holds an active worker."""
+        if self._external_busy != busy:
+            self._external_busy = busy
+            self._update_controls()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -239,7 +248,7 @@ class ExecutionWidget(QWidget):
         self._session_name = session_name
         self._current_run = None
         self._current_results = []
-        self._results_by_func = {}
+        self._results_by_id = {}
         self.results_table.setRowCount(0)
         self._clear_details()
         self.live_log_view.clear()
@@ -269,17 +278,22 @@ class ExecutionWidget(QWidget):
         self._update_controls()
 
     def shutdown(self) -> None:
-        """Cancel and wait for any active execution worker before window exit."""
+        """Cancel, disconnect, and wait for any active execution worker before window exit."""
         worker = self._worker
         if worker is not None:
+            for sig in (worker.progress_event, worker.run_completed, worker.run_failed):
+                with suppress(RuntimeError, TypeError):
+                    sig.disconnect()
             worker.request_cancel()
             if not worker.wait(5000):
                 worker.wait(5000)
             if not worker.isRunning():
                 worker.deleteLater()
-                self._worker = None
-                self._active_run_session_id = None
-                self._active_run_id = None
+            else:
+                worker.setParent(None)
+            self._worker = None
+            self._active_run_session_id = None
+            self._active_run_id = None
 
     def _populate_tests_list(self) -> None:
         self.tests_list.clear()
@@ -327,11 +341,11 @@ class ExecutionWidget(QWidget):
         mode: ExecutionMode = ExecutionMode.INDEPENDENT,
         rerun_failed_run_id: str | None = None,
     ) -> None:
-        if self._session_id is None or self._worker is not None:
+        if self._session_id is None or self._worker is not None or self._external_busy:
             return
         self._current_run = None
         self._current_results = []
-        self._results_by_func = {}
+        self._results_by_id = {}
         self.results_table.setRowCount(0)
         self._clear_details()
         self.live_log_view.clear()
@@ -528,7 +542,7 @@ class ExecutionWidget(QWidget):
         self._update_controls()
 
     def _render_results_table(self, results: list[TestCaseResult]) -> None:
-        self._results_by_func = {}
+        self._results_by_id = {}
         self.results_table.setRowCount(0)
         for res in results:
             self._upsert_result_row(res)
@@ -538,11 +552,11 @@ class ExecutionWidget(QWidget):
             self._clear_details()
 
     def _upsert_result_row(self, result: TestCaseResult) -> None:
-        self._results_by_func[result.function_name] = result
+        self._results_by_id[result.id] = result
         target_row = -1
         for row_idx in range(self.results_table.rowCount()):
             item = self.results_table.item(row_idx, 1)
-            if item is not None and item.data(Qt.ItemDataRole.UserRole) == result.function_name:
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == result.id:
                 target_row = row_idx
                 break
 
@@ -551,7 +565,7 @@ class ExecutionWidget(QWidget):
             self.results_table.insertRow(target_row)
 
         name_item = QTableWidgetItem(result.test_name or result.function_name)
-        name_item.setData(Qt.ItemDataRole.UserRole, result.function_name)
+        name_item.setData(Qt.ItemDataRole.UserRole, result.id)
         dur_str = f"{result.duration_ms} ms" if result.duration_ms else "-"
 
         self.results_table.setItem(target_row, 0, QTableWidgetItem(result.status.value.upper()))
@@ -568,8 +582,8 @@ class ExecutionWidget(QWidget):
         if item is None:
             self._clear_details()
             return
-        func_name = str(item.data(Qt.ItemDataRole.UserRole))
-        result = self._results_by_func.get(func_name)
+        result_id = str(item.data(Qt.ItemDataRole.UserRole))
+        result = self._results_by_id.get(result_id)
         if result is None:
             self._clear_details()
             return
@@ -644,23 +658,22 @@ class ExecutionWidget(QWidget):
 
     def _update_controls(self) -> None:
         running = self._worker is not None
+        locked = running or self._external_busy
         has_session = self._session_id is not None
         has_defs = bool(self._definitions)
         can_rerun = (
-            not running and self._current_run is not None and self._current_run.failed_count > 0
+            not locked and self._current_run is not None and self._current_run.failed_count > 0
         )
 
-        self.run_selected_btn.setEnabled(has_session and has_defs and not running)
+        self.run_selected_btn.setEnabled(has_session and has_defs and not locked)
         self.run_scenario_btn.setEnabled(
-            has_session
-            and any(d.scenario_id is not None for d in self._definitions)
-            and not running
+            has_session and any(d.scenario_id is not None for d in self._definitions) and not locked
         )
-        self.run_independent_btn.setEnabled(has_session and has_defs and not running)
-        self.run_journey_btn.setEnabled(has_session and has_defs and not running)
-        self.run_suite_btn.setEnabled(has_session and has_defs and not running)
+        self.run_independent_btn.setEnabled(has_session and has_defs and not locked)
+        self.run_journey_btn.setEnabled(has_session and has_defs and not locked)
+        self.run_suite_btn.setEnabled(has_session and has_defs and not locked)
         self.rerun_failed_btn.setEnabled(can_rerun)
         self.stop_btn.setEnabled(running)
-        self.refresh_btn.setEnabled(has_session and not running)
-        self.headed_checkbox.setEnabled(not running)
-        self.env_vars_btn.setEnabled(not running)
+        self.refresh_btn.setEnabled(has_session and not locked)
+        self.headed_checkbox.setEnabled(not locked)
+        self.env_vars_btn.setEnabled(not locked)

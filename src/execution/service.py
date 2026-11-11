@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from src.definitions.models import TestDefinition, TestMode, slugify_test_function_name
+from src.definitions.models import TestDefinition, TestMode
 from src.definitions.repository import TestDefinitionRepository
 from src.execution.models import (
     ExecutionError,
@@ -20,6 +20,7 @@ from src.execution.models import (
 from src.execution.repository import ExecutionRepository
 from src.execution.runner import ExecutionRunner, ProgressCallback
 from src.export.service import CopyExportService
+from src.generator.pytest_generator import assign_unique_function_names
 from src.projects.repository import ProjectRepository, SessionRepository
 from src.storage.artifacts import ArtifactManager, ArtifactRepository
 
@@ -90,16 +91,19 @@ class ExecutionService:
         )
         self._execution_repo.create_run(run)
 
+        resolved_names = assign_unique_function_names(selected)
         initial_results = [
             TestCaseResult(
                 run_id=run.id,
                 definition_id=defn.id,
-                function_name=defn.function_name or slugify_test_function_name(defn.name),
+                function_name=unique_func_name,
                 test_name=defn.name,
                 status=TestResultStatus.PENDING,
                 order_index=idx,
             )
-            for idx, defn in enumerate(selected, start=1)
+            for idx, (defn, (_module_file, unique_func_name)) in enumerate(
+                zip(selected, resolved_names, strict=True), start=1
+            )
         ]
         self._execution_repo.create_results(initial_results)
 
@@ -125,6 +129,7 @@ class ExecutionService:
                 base_url=effective_base_url,
                 headed=effective_headed,
                 extra_env=extra_env,
+                auth_context_definitions=all_defs,
                 cancel_event=cancel_event,
                 on_result_updated=self._execution_repo.update_result,
                 on_event=on_event,

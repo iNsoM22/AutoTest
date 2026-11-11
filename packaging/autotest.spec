@@ -23,7 +23,8 @@ hiddenimports = (
     + collect_submodules("pytest")
     + collect_submodules("_pytest")
     + collect_submodules("pytest_playwright")
-    + ["pytest_base_url", "platformdirs", "pydantic_settings"]
+    + collect_submodules("pytest_base_url")
+    + ["platformdirs", "pydantic_settings"]
 )
 
 datas = (

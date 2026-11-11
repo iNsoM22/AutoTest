@@ -72,10 +72,35 @@ def _find_auth_setup_definition(definitions: Sequence[TestDefinition]) -> TestDe
     return None
 
 
+def assign_unique_function_names(
+    definitions: Sequence[TestDefinition],
+) -> list[tuple[str, str]]:
+    """Return ``(module_filename, unique_function_name)`` matching ``generate_suite()``."""
+    seen_by_module: dict[str, set[str]] = {}
+    resolved: list[tuple[str, str]] = []
+    for definition in definitions:
+        module_file = (
+            "test_journey.py" if definition.mode == TestMode.JOURNEY else "test_scenarios.py"
+        )
+        seen = seen_by_module.setdefault(module_file, set())
+        base_name = definition.function_name or slugify_test_function_name(definition.name)
+        unique_name = base_name
+        suffix = 2
+        while unique_name in seen:
+            unique_name = f"{base_name}_{suffix}"
+            suffix += 1
+        seen.add(unique_name)
+        resolved.append((module_file, unique_name))
+    return resolved
+
+
 def _safe_doc_text(text: str) -> str:
     """Sanitize arbitrary user text for safe embedding inside triple-quoted docstrings."""
-    cleaned = " ".join(text.replace('"""', "'''").split())
-    return cleaned.rstrip("\\")
+    escaped = text.replace("\\", "\\\\").replace('"""', "'''")
+    cleaned = " ".join(escaped.split())
+    if cleaned.endswith('"'):
+        cleaned = cleaned[:-1] + '\\"'
+    return cleaned
 
 
 def _safe_comment_text(text: str) -> str:
@@ -127,6 +152,7 @@ class PytestPlaywrightGenerator:
         definition: TestDefinition,
         *,
         function_name: str | None = None,
+        shared_browser_context: bool = False,
     ) -> str:
         """Render a single Pytest test function body (without module-level imports)."""
         page_fixture = "authenticated_page" if _uses_auth_fixture(definition) else "page"
@@ -169,7 +195,12 @@ class PytestPlaywrightGenerator:
         for prereq in definition.prerequisites:
             if prereq.setup_url and not starts_with_nav:
                 lines.append(f"    # Prerequisite: {_safe_comment_text(prereq.description)}")
-                lines.append(f"    {page_fixture}.goto({prereq.setup_url!r})")
+                if page_fixture == "authenticated_page" or shared_browser_context:
+                    expected_url = prereq.setup_url.rstrip("/")
+                    lines.append(f"    if {page_fixture}.url.rstrip('/') != {expected_url!r}:")
+                    lines.append(f"        {page_fixture}.goto({prereq.setup_url!r})")
+                else:
+                    lines.append(f"    {page_fixture}.goto({prereq.setup_url!r})")
             elif prereq.fixture_name == "authenticated_page":
                 lines.append(f"    # Prerequisite: {_safe_comment_text(prereq.description)}")
 
@@ -178,23 +209,18 @@ class PytestPlaywrightGenerator:
         for assertion in definition.assertions:
             assertions_by_action.setdefault(assertion.after_action_id, []).append(assertion)
 
-        emitted_body = False
-        has_opened_tab = False
-        for action in definition.actions:
-            emitted_body = True
-            if action.action_type == ProcessedActionType.OPEN_TAB:
-                has_opened_tab = True
-            lines.extend(self._render_action(action, page_fixture, has_opened_tab=has_opened_tab))
-            if action.action_type == ProcessedActionType.CLOSE_TAB and has_opened_tab:
-                has_opened_tab = False
-            for assertion in assertions_by_action.pop(action.id, []):
-                lines.extend(self._render_assertion(assertion, page_fixture))
+        action_lines, active_page, emitted_body = self._render_action_sequence(
+            definition.actions,
+            page_fixture,
+            assertions_by_action=assertions_by_action,
+        )
+        lines.extend(action_lines)
 
         # Remaining detached / end-of-test assertions
         for leftover_group in assertions_by_action.values():
             for assertion in leftover_group:
                 emitted_body = True
-                lines.extend(self._render_assertion(assertion, page_fixture))
+                lines.extend(self._render_assertion(assertion, active_page))
 
         if not emitted_body:
             lines.append("    # No recorded actions in this test definition.")
@@ -207,6 +233,7 @@ class PytestPlaywrightGenerator:
         definitions: Sequence[TestDefinition],
         *,
         module_doc: str = "Generated end-to-end Playwright + Pytest tests.",
+        shared_browser_context: bool = False,
     ) -> str:
         """Render a complete standalone `.py` test module for one or more definitions."""
         lines: list[str] = [
@@ -241,7 +268,13 @@ class PytestPlaywrightGenerator:
             if idx > 0:
                 lines.append("")
             lines.append("")
-            lines.append(self.render_test_function(definition, function_name=unique_name))
+            lines.append(
+                self.render_test_function(
+                    definition,
+                    function_name=unique_name,
+                    shared_browser_context=shared_browser_context,
+                )
+            )
 
         lines.append("")
         return "\n".join(lines)
@@ -252,6 +285,7 @@ class PytestPlaywrightGenerator:
         *,
         base_url: str = "",
         shared_browser_context: bool = False,
+        auth_context_definitions: Sequence[TestDefinition] | None = None,
     ) -> GeneratedFile:
         """Render a standalone `conftest.py` with viewport, base URL, and optional auth fixtures."""
         resolved_base = base_url or next(
@@ -274,8 +308,9 @@ class PytestPlaywrightGenerator:
         else:
             width, height = 1280, 720
         needs_auth = any(_uses_auth_fixture(d) for d in definitions)
+        auth_source = auth_context_definitions if auth_context_definitions else definitions
         auth_setup_def = (
-            None if shared_browser_context else _find_auth_setup_definition(definitions)
+            None if shared_browser_context else _find_auth_setup_definition(auth_source)
         )
         needs_browser_import = shared_browser_context or (needs_auth and not shared_browser_context)
         needs_page_import = shared_browser_context or needs_auth
@@ -379,8 +414,11 @@ class PytestPlaywrightGenerator:
                     for prereq in auth_setup_def.prerequisites:
                         if prereq.setup_url and not starts_with_nav:
                             lines.append(f"    page.goto({prereq.setup_url!r})")
-                    for action in auth_setup_def.actions:
-                        lines.extend(self._render_action(action, "page"))
+                    auth_lines, _, _ = self._render_action_sequence(
+                        auth_setup_def.actions,
+                        "page",
+                    )
+                    lines.extend(auth_lines)
                 lines.extend(
                     [
                         "",
@@ -445,6 +483,7 @@ class PytestPlaywrightGenerator:
         base_url: str = "",
         shared_browser_context: bool = False,
         include_excluded: bool = False,
+        auth_context_definitions: Sequence[TestDefinition] | None = None,
     ) -> GeneratedSuite:
         """Generate a complete standalone suite (conftest, pytest.ini, and test modules)."""
         included = list(definitions) if include_excluded else [d for d in definitions if d.included]
@@ -459,6 +498,7 @@ class PytestPlaywrightGenerator:
                     content=self.render_test_module(
                         independent,
                         module_doc="Independent Playwright + Pytest scenario tests.",
+                        shared_browser_context=shared_browser_context,
                     ),
                     description=f"{len(independent)} independent scenario test(s).",
                 )
@@ -470,6 +510,7 @@ class PytestPlaywrightGenerator:
                     content=self.render_test_module(
                         journeys,
                         module_doc="Complete sequential Playwright + Pytest journey test.",
+                        shared_browser_context=shared_browser_context,
                     ),
                     description=f"{len(journeys)} sequential journey test(s).",
                 )
@@ -480,10 +521,49 @@ class PytestPlaywrightGenerator:
                 included,
                 base_url=base_url,
                 shared_browser_context=shared_browser_context,
+                auth_context_definitions=auth_context_definitions,
             ),
             pytest_ini=self.render_pytest_ini(base_url=base_url),
             test_files=test_files,
         )
+
+    def _render_action_sequence(
+        self,
+        actions: Sequence[TestAction],
+        base_page_var: str,
+        *,
+        assertions_by_action: dict[str | None, list[TestAssertion]] | None = None,
+    ) -> tuple[list[str], str, bool]:
+        """Render actions (and paired assertions) while tracking an active-tab page stack."""
+        lines: list[str] = []
+        page_stack: list[str] = [base_page_var]
+        tab_counter = 0
+        emitted_body = False
+
+        for action in actions:
+            emitted_body = True
+            current_page = page_stack[-1]
+            if action.action_type == ProcessedActionType.OPEN_TAB:
+                tab_counter += 1
+                new_var = "new_page" if tab_counter == 1 else f"new_page_{tab_counter}"
+                lines.append(f"    {new_var} = {current_page}.context.new_page()")
+                if action.url and action.url != "about:blank":
+                    lines.append(f"    {new_var}.goto({action.url!r})")
+                page_stack.append(new_var)
+            elif action.action_type == ProcessedActionType.CLOSE_TAB:
+                if len(page_stack) > 1:
+                    closed_var = page_stack.pop()
+                    lines.append(f"    {closed_var}.close()")
+                else:
+                    lines.append(f"    # Recorded tab close: {_safe_comment_text(action.summary)}")
+            else:
+                lines.extend(self._render_action(action, current_page))
+
+            if assertions_by_action is not None:
+                for assertion in assertions_by_action.pop(action.id, []):
+                    lines.extend(self._render_assertion(assertion, page_stack[-1]))
+
+        return lines, page_stack[-1], emitted_body
 
     def _render_action(
         self,

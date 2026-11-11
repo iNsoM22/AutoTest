@@ -215,3 +215,40 @@ def test_project_switching_clears_tabs_and_session_reloads_pages(
     assert window.execution_widget is not None
     assert window.execution_widget.tests_list.count() == 0
     assert p2.name == "Beta App"
+
+    # High #18: Switching between two projects that BOTH have a session at Row 0 populates tabs
+    s2 = app_context.session_service.create_session(p2.id, name="Beta Session")
+    app_context.session_service.register_page(
+        s2.id,
+        page_id="pg-beta-1",
+        tab_index=0,
+        url="https://beta.example.com/dash",
+        title="Beta Dash",
+    )
+    for idx in range(window.project_list.count()):
+        item = window.project_list.item(idx)
+        if item is not None and item.text() == "Alpha App":
+            window.project_list.setCurrentRow(idx)
+            break
+    assert window.pages_table.rowCount() == 1
+    assert window.pages_table.item(0, 1).text() == "Alpha Home"  # type: ignore[union-attr]
+
+    for idx in range(window.project_list.count()):
+        item = window.project_list.item(idx)
+        if item is not None and item.text() == "Beta App":
+            window.project_list.setCurrentRow(idx)
+            break
+    assert window.pages_table.rowCount() == 1
+    assert window.pages_table.item(0, 1).text() == "Beta Dash"  # type: ignore[union-attr]
+
+    # High #17: External busy lock disables sibling tab controls
+    assert window.review_widget is not None
+    assert window.definitions_widget is not None
+    window.review_widget.set_external_busy(True)
+    assert not window.review_widget.process_btn.isEnabled()
+    window.review_widget.set_external_busy(False)
+    assert window.review_widget.process_btn.isEnabled()
+    window.definitions_widget.set_external_busy(True)
+    assert not window.definitions_widget.generate_btn.isEnabled()
+    window.definitions_widget.set_external_busy(False)
+    assert window.definitions_widget.generate_btn.isEnabled()

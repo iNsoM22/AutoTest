@@ -381,11 +381,13 @@ class ProcessingEngine:
 
         if etype == EventType.NAVIGATION:
             url = str(event.payload.get("url", ""))
-            if not url or url == "about:blank":
+            nav_type = str(event.payload.get("navigation_type", "navigate"))
+            if not url or url == "about:blank" or nav_type == "tab_switch":
                 return
-            # Deduplicate identical consecutive navigation on same page
+            # Deduplicate identical consecutive navigation on same page (unless genuine reload)
             if (
-                last is not None
+                nav_type != "reload"
+                and last is not None
                 and last.page_id == event.page_id
                 and last.action_type in (ProcessedActionType.NAVIGATE, ProcessedActionType.OPEN_TAB)
                 and last.payload.get("url") == url
@@ -398,13 +400,29 @@ class ProcessingEngine:
 
             # If navigation immediately follows a trigger action on the same page, treat as outcome
             if (
-                last is not None
+                nav_type != "reload"
+                and last is not None
                 and last.page_id == event.page_id
                 and last.action_type in _NAV_TRIGGER_ACTIONS
                 and 0.0
                 <= _ms_between(last.ended_at, event.timestamp)
                 <= self._config.correlation_window_ms
             ):
+                # Deduplicate repeated navigation outcomes to the same URL for the same trigger
+                for existing_pid, existing_out in reversed(outcomes):
+                    if existing_out.timestamp < last.ended_at:
+                        break
+                    if (
+                        existing_pid == event.page_id
+                        and existing_out.outcome_type == OutcomeType.NAVIGATION
+                        and existing_out.details.get("url") == url
+                    ):
+                        existing_out.raw_event_ids = _merge_ids(
+                            existing_out.raw_event_ids, [event.id]
+                        )
+                        if event.payload.get("title") and not existing_out.details.get("title"):
+                            existing_out.details["title"] = event.payload["title"]
+                        return
                 outcomes.append(
                     (
                         event.page_id,

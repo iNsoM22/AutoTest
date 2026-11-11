@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import sys
@@ -156,6 +157,10 @@ def _attach_parent_console_if_frozen() -> None:
 
 def _run_embedded_pytest(pytest_args: list[str]) -> int:
     """Execute Pytest directly inside a frozen executable subprocess."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            with contextlib.suppress(Exception):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     extra_pypath = os.environ.get("PYTHONPATH", "")
     for entry in reversed(extra_pypath.split(os.pathsep)):
         if entry and entry not in sys.path:
@@ -171,9 +176,11 @@ def main(argv: list[str] | None = None) -> int:
     if raw_argv and raw_argv[0] == "--run-pytest":
         return _run_embedded_pytest(raw_argv[1:])
 
+    if raw_argv:
+        _attach_parent_console_if_frozen()
+
     args = _parse_args(raw_argv)
     if args.doctor:
-        _attach_parent_console_if_frozen()
         settings = bootstrap()
         report = run_environment_diagnostics(settings)
         print(report.format_text())
@@ -182,7 +189,6 @@ def main(argv: list[str] | None = None) -> int:
     context = create_app_context()
     try:
         if args.check:
-            _attach_parent_console_if_frozen()
             logger.info("Health check succeeded (db=%s).", context.settings.db_path)
             return 0
 

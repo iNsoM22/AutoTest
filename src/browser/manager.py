@@ -245,8 +245,9 @@ class BrowserManager:
         current = self._page_info[page_id]
         new_url = page.url or current.url
         new_title = self._safe_title(page) or current.title
-        is_reload = force_notify and bool(current.url) and new_url == current.url
-        if not force_notify and new_url == current.url and new_title == current.title:
+        url_changed = new_url != current.url
+        is_reload = force_notify and bool(current.url) and not url_changed
+        if not force_notify and not url_changed and new_title == current.title:
             return current
 
         nav_type = "reload" if is_reload else "navigate"
@@ -254,7 +255,11 @@ class BrowserManager:
             update={"url": new_url, "title": new_title, "navigation_type": nav_type}
         )
         self._page_info[page_id] = updated
-        if notify and self._callbacks.on_page_navigated is not None:
+        if (
+            notify
+            and (force_notify or url_changed)
+            and self._callbacks.on_page_navigated is not None
+        ):
             self._callbacks.on_page_navigated(updated)
         return updated
 

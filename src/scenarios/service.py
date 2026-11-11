@@ -109,10 +109,22 @@ class ScenarioService:
         return self._scenario_repo.update(updated)
 
     def delete_scenario(self, scenario_id: str) -> None:
-        """Remove a scenario and re-index remaining scenarios in the session."""
+        """Remove a scenario and re-index remaining scenarios in-place."""
         scenario = self._require_scenario(scenario_id)
-        self._scenario_repo.delete(scenario_id)
-        self._reindex_session_scenarios(scenario.session_id)
+        remaining = [
+            s
+            for s in self._scenario_repo.list_by_session(scenario.session_id)
+            if s.id != scenario_id
+        ]
+        now = datetime.now(UTC)
+        reindexed = [
+            s.model_copy(update={"order_index": idx, "updated_at": now})
+            for idx, s in enumerate(remaining, start=1)
+        ]
+        self._scenario_repo.save_batch(
+            to_delete_ids=[scenario_id],
+            to_update=reindexed,
+        )
 
     def merge_scenarios(
         self,
@@ -143,6 +155,7 @@ class ScenarioService:
         merged_raw_ids = _dedupe_preserve([rid for s in targets for rid in s.raw_event_ids])
         merged_name = (new_name.strip() if new_name else "") or first.name
 
+        now = datetime.now(UTC)
         merged = first.model_copy(
             update={
                 "name": merged_name,
@@ -150,13 +163,25 @@ class ScenarioService:
                 "included": any(s.included for s in targets),
                 "processed_event_ids": merged_processed_ids,
                 "raw_event_ids": merged_raw_ids,
-                "updated_at": datetime.now(UTC),
+                "updated_at": now,
             }
         )
-        self._scenario_repo.update(merged)
-        for extra in targets[1:]:
-            self._scenario_repo.delete(extra.id)
-        self._reindex_session_scenarios(first.session_id)
+        drop_ids = {extra.id for extra in targets[1:]}
+        session_scenarios = self._scenario_repo.list_by_session(first.session_id)
+        surviving: list[Scenario] = []
+        for item in session_scenarios:
+            if item.id == merged.id:
+                surviving.append(merged)
+            elif item.id not in drop_ids:
+                surviving.append(item)
+        reindexed = [
+            s.model_copy(update={"order_index": idx, "updated_at": now})
+            for idx, s in enumerate(surviving, start=1)
+        ]
+        self._scenario_repo.save_batch(
+            to_delete_ids=list(drop_ids),
+            to_update=reindexed,
+        )
         return self._require_scenario(merged.id)
 
     def split_scenario(
@@ -218,9 +243,12 @@ class ScenarioService:
                 reordered.append(item)
 
         normalized = [
-            s.model_copy(update={"order_index": idx}) for idx, s in enumerate(reordered, start=1)
+            s.model_copy(update={"order_index": idx, "updated_at": now})
+            for idx, s in enumerate(reordered, start=1)
         ]
-        self._scenario_repo.replace_for_session(scenario.session_id, normalized)
+        to_insert = [s for s in normalized if s.id == right_created.id]
+        to_update = [s for s in normalized if s.id != right_created.id]
+        self._scenario_repo.save_batch(to_update=to_update, to_insert=to_insert)
         return self._require_scenario(left_updated.id), self._require_scenario(right_created.id)
 
     def reorder_scenarios(
@@ -241,17 +269,11 @@ class ScenarioService:
             by_id[sid].model_copy(update={"order_index": idx, "updated_at": now})
             for idx, sid in enumerate(ordered_scenario_ids, start=1)
         ]
-        return self._scenario_repo.replace_for_session(session_id, reordered)
+        self._scenario_repo.save_batch(to_update=reordered)
+        return reordered
 
     def _require_scenario(self, scenario_id: str) -> Scenario:
         scenario = self._scenario_repo.get(scenario_id)
         if scenario is None:
             raise ScenarioError(f"Scenario '{scenario_id}' not found.")
         return scenario
-
-    def _reindex_session_scenarios(self, session_id: str) -> None:
-        remaining = self._scenario_repo.list_by_session(session_id)
-        normalized = [
-            s.model_copy(update={"order_index": idx}) for idx, s in enumerate(remaining, start=1)
-        ]
-        self._scenario_repo.replace_for_session(session_id, normalized)

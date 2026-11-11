@@ -87,6 +87,7 @@ class CopyExportService:
         base_url: str = "",
         shared_browser_context: bool = False,
         include_excluded: bool = False,
+        auth_context_definitions: Sequence[TestDefinition] | None = None,
     ) -> list[Path]:
         """Write a complete standalone Pytest + Playwright suite to `output_dir`."""
         suite = self._generator.generate_suite(
@@ -94,6 +95,7 @@ class CopyExportService:
             base_url=base_url,
             shared_browser_context=shared_browser_context,
             include_excluded=include_excluded,
+            auth_context_definitions=auth_context_definitions,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         written: list[Path] = []

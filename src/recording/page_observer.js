@@ -505,6 +505,11 @@
             collectNotable(added);
             if (added && added.nodeType === 1) {
               if (added.shadowRoot) observeRoot(added.shadowRoot);
+              if (typeof added.querySelectorAll === "function") {
+                for (const desc of added.querySelectorAll("*")) {
+                  if (desc.shadowRoot) observeRoot(desc.shadowRoot);
+                }
+              }
             }
           }
         } else if (rec.type === "attributes") {

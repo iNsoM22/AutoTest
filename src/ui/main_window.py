@@ -281,6 +281,8 @@ class MainWindow(QMainWindow):
         if self._scenario_service is not None:
             self.review_widget = ReviewWidget(self._scenario_service, panel)
             self.review_widget.scenarios_changed.connect(self._on_scenarios_changed)
+            self.review_widget.processing_started.connect(self._on_execution_state_changed)
+            self.review_widget.processing_finished.connect(self._on_execution_state_changed)
             self.tabs.addTab(self.review_widget, "Timeline & Scenarios")
 
         # Tab 5: Test Definitions & Generated Code
@@ -354,8 +356,13 @@ class MainWindow(QMainWindow):
     def _is_execution_running(self) -> bool:
         return self.execution_widget is not None and self.execution_widget.is_running
 
+    def _is_processing(self) -> bool:
+        return self.review_widget is not None and self.review_widget.is_processing
+
     def _is_busy(self) -> bool:
-        return self._active_worker is not None or self._is_execution_running()
+        return (
+            self._active_worker is not None or self._is_execution_running() or self._is_processing()
+        )
 
     def _on_scenarios_changed(self, _session_id: str) -> None:
         if self.definitions_widget is not None:
@@ -377,9 +384,21 @@ class MainWindow(QMainWindow):
     def _on_execution_state_changed(self) -> None:
         self._update_project_view()
 
+    def _sync_tab_locks(self) -> None:
+        recording = self._active_worker is not None
+        executing = self._is_execution_running()
+        processing = self._is_processing()
+        if self.review_widget is not None:
+            self.review_widget.set_external_busy(recording or executing)
+        if self.definitions_widget is not None:
+            self.definitions_widget.set_external_busy(recording or executing or processing)
+        if self.execution_widget is not None:
+            self.execution_widget.set_external_busy(recording or processing)
+
     def _update_project_view(self) -> None:
         has_active_session = self._active_worker is not None
         is_busy = self._is_busy()
+        self._sync_tab_locks()
         project = self._projects.get(self._selected_project_id or "")
 
         self.edit_project_btn.setEnabled(project is not None and not is_busy)
@@ -413,7 +432,9 @@ class MainWindow(QMainWindow):
         if not is_busy:
             self.start_url_input.setText(project.base_url)
         self.start_url_input.setEnabled(not is_busy)
-        self.record_toggle_btn.setEnabled(has_active_session or not self._is_execution_running())
+        self.record_toggle_btn.setEnabled(
+            has_active_session or not (self._is_execution_running() or self._is_processing())
+        )
         self._refresh_sessions(project.id)
         if project_changed and not is_busy and self.sessions_table.rowCount() > 0:
             self.sessions_table.selectRow(0)
@@ -486,9 +507,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_sessions(self, project_id: str) -> None:
         sessions = self._session_service.list_sessions(project_id)
+        self.sessions_table.blockSignals(True)
+        self.sessions_table.clearSelection()
+        self.sessions_table.setCurrentCell(-1, -1)
         self.sessions_table.setRowCount(len(sessions))
         for row_idx, session in enumerate(sessions):
             self._populate_session_row(row_idx, session)
+        self.sessions_table.blockSignals(False)
         is_busy = self._is_busy()
         self.delete_session_btn.setEnabled(bool(sessions) and not is_busy)
         self.review_session_btn.setEnabled(
@@ -559,6 +584,8 @@ class MainWindow(QMainWindow):
             return
         self._clear_session_tabs()
         self._refresh_sessions(self._selected_project_id)
+        if self.sessions_table.rowCount() > 0:
+            self.sessions_table.selectRow(0)
 
     def _on_toggle_recording(self) -> None:
         if self._active_worker is not None:
@@ -804,16 +831,32 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure any active browser, review, or execution worker stops cleanly before exiting."""
-        if self.review_widget is not None:
-            self.review_widget.shutdown()
-        if self.execution_widget is not None:
-            self.execution_widget.shutdown()
-        if self._active_worker is not None:
-            self._active_worker.request_stop()
-            self._active_worker.wait(5000)
+        worker = self._active_worker
+        if worker is not None:
+            for sig in (
+                worker.session_started,
+                worker.page_opened,
+                worker.page_navigated,
+                worker.page_closed,
+                worker.events_recorded,
+                worker.session_finished,
+                worker.session_failed,
+            ):
+                with suppress(RuntimeError, TypeError):
+                    sig.disconnect()
+            worker.request_stop()
+            worker.wait(5000)
+            if not worker.isRunning():
+                worker.deleteLater()
+            else:
+                worker.setParent(None)
             if self._active_session_id is not None:
                 with suppress(ProjectError):
                     self._session_service.stop_session(self._active_session_id)
             self._active_worker = None
             self._active_session_id = None
+        if self.review_widget is not None:
+            self.review_widget.shutdown()
+        if self.execution_widget is not None:
+            self.execution_widget.shutdown()
         super().closeEvent(event)

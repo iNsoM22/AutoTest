@@ -28,6 +28,7 @@ _ALLOWED_EVENT_TYPES = frozenset(
         EventType.HOVER,
         EventType.SCROLL,
         EventType.DOM_MUTATION,
+        EventType.NAVIGATION,
     }
 )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -32,6 +33,8 @@ class ReviewWidget(QWidget):
     """Interactive review panel for correlated timelines and editable scenarios."""
 
     scenarios_changed = Signal(str)
+    processing_started = Signal()
+    processing_finished = Signal()
 
     def __init__(
         self,
@@ -47,6 +50,7 @@ class ReviewWidget(QWidget):
         self._visible_events: list[ProcessedEvent] = []
         self._uncorrelated_outcomes: list[CorrelatedOutcome] = []
         self._worker: SessionProcessingWorker | None = None
+        self._external_busy: bool = False
 
         self._build_ui()
         self._update_controls()
@@ -56,14 +60,25 @@ class ReviewWidget(QWidget):
         """Return True while background session processing is running."""
         return self._worker is not None
 
+    def set_external_busy(self, busy: bool) -> None:
+        """Lock/unlock review controls while another tab holds an active worker."""
+        if self._external_busy != busy:
+            self._external_busy = busy
+            self._update_controls()
+
     def shutdown(self) -> None:
-        """Wait for any active background processing worker before widget teardown."""
+        """Disconnect and wait for any active background processing worker before teardown."""
         worker = self._worker
         if worker is not None:
+            for sig in (worker.processing_finished, worker.processing_failed):
+                with suppress(RuntimeError, TypeError):
+                    sig.disconnect()
             worker.wait(5000)
             if not worker.isRunning():
                 worker.deleteLater()
-                self._worker = None
+            else:
+                worker.setParent(None)
+            self._worker = None
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -223,7 +238,7 @@ class ReviewWidget(QWidget):
 
     def process_current_session(self) -> None:
         """Run deterministic processing and scenario detection off the UI thread."""
-        if self._session_id is None or self._worker is not None:
+        if self._session_id is None or self._worker is not None or self._external_busy:
             return
         worker = SessionProcessingWorker(self._scenario_service, self._session_id, parent=self)
         worker.processing_finished.connect(self._on_processing_finished)
@@ -232,6 +247,7 @@ class ReviewWidget(QWidget):
         label = self._session_name or self._session_id[:8]
         self.summary_label.setText(f"{label}: Processing raw events...")
         self._update_controls()
+        self.processing_started.emit()
         worker.start()
 
     def _on_processing_finished(
@@ -248,9 +264,11 @@ class ReviewWidget(QWidget):
 
         if session_id != self._session_id:
             self._update_controls()
+            self.processing_finished.emit()
             return
         if not isinstance(result_obj, ProcessingResult) or not isinstance(scenarios_obj, list):
             self._update_controls()
+            self.processing_finished.emit()
             return
 
         scenarios: list[Scenario] = scenarios_obj
@@ -270,6 +288,7 @@ class ReviewWidget(QWidget):
             f"{len(scenarios)} scenario(s) ({result_obj.dropped_count} filtered{uncorr_note})"
         )
         self._update_controls()
+        self.processing_finished.emit()
         self.scenarios_changed.emit(self._session_id)
 
     def _on_processing_failed(self, session_id: str, error_message: str) -> None:
@@ -280,6 +299,7 @@ class ReviewWidget(QWidget):
             worker.deleteLater()
 
         self._update_controls()
+        self.processing_finished.emit()
         if session_id == self._session_id:
             QMessageBox.warning(self, "Processing Failed", error_message)
 
@@ -514,7 +534,7 @@ class ReviewWidget(QWidget):
 
     def _update_controls(self) -> None:
         has_session = self._session_id is not None
-        busy = self._worker is not None
+        busy = self._worker is not None or self._external_busy
         selected = self._selected_scenarios()
         single = len(selected) == 1
         multi = len(selected) >= 2

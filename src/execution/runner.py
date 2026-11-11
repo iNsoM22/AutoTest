@@ -28,6 +28,7 @@ from src.execution.models import (
     TestRun,
 )
 from src.export.service import CopyExportService
+from src.generator.pytest_generator import assign_unique_function_names
 from src.storage.artifacts import ArtifactManager, ArtifactRecord, ArtifactRepository
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,20 @@ _META_BY_NODEID: dict[str, dict[str, Any]] = {}
 
 def _emit(payload: dict[str, Any]) -> None:
     stream = sys.__stdout__ if sys.__stdout__ is not None else sys.stdout
-    stream.write(f"\\n{_PREFIX}{json.dumps(payload, ensure_ascii=False)}\\n")
+    stream.write(f"\\n{_PREFIX}{json.dumps(payload, ensure_ascii=True)}\\n")
     stream.flush()
 
 
 def _base_func_name(nodeid: str) -> str:
     raw = nodeid.rsplit("::", 1)[-1]
     return raw.split("[", 1)[0]
+
+
+def _node_key(nodeid: str) -> str:
+    parts = nodeid.split("::")
+    module_name = Path(parts[0]).name if parts else ""
+    func_name = _base_func_name(nodeid)
+    return f"{module_name}::{func_name}" if module_name else func_name
 
 
 @pytest.fixture(autouse=True)
@@ -135,9 +143,10 @@ def _autotest_page_observer(request: pytest.FixtureRequest):
         try:
             out_dir = Path(screenshot_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
+            module_stem = Path(request.node.nodeid.split("::", 1)[0]).stem
             func_name = _base_func_name(request.node.nodeid)
-            target = out_dir / f"{func_name}.png"
-            page.screenshot(path=str(target), full_page=True)
+            target = out_dir / f"{module_stem}__{func_name}.png"
+            page.screenshot(path=str(target), full_page=True, timeout=5000)
             screenshot_path = str(target)
         except Exception:
             screenshot_path = ""
@@ -155,6 +164,7 @@ def pytest_runtest_logstart(nodeid: str, location: Any) -> None:
     _emit(
         {
             "type": "test_started",
+            "node_key": _node_key(nodeid),
             "function_name": _base_func_name(nodeid),
         }
     )
@@ -220,6 +230,7 @@ def pytest_runtest_logfinish(nodeid: str, location: Any) -> None:
     _emit(
         {
             "type": "test_finished",
+            "node_key": _node_key(nodeid),
             "function_name": _base_func_name(nodeid),
             "status": status,
             "duration_ms": max(0, int(round(duration_s * 1000))),
@@ -280,6 +291,7 @@ class ExecutionRunner:
         base_url: str = "",
         headed: bool = False,
         extra_env: dict[str, str] | None = None,
+        auth_context_definitions: Sequence[TestDefinition] | None = None,
         cancel_event: threading.Event | None = None,
         on_result_updated: Callable[[TestCaseResult], Any] | None = None,
         on_event: ProgressCallback | None = None,
@@ -295,13 +307,20 @@ class ExecutionRunner:
             base_url=base_url,
             shared_browser_context=shared_context,
             include_excluded=True,
+            auth_context_definitions=auth_context_definitions,
         )
 
         plugin_path = run_dir / "_autotest_runner_plugin.py"
         plugin_path.write_text(_RUNNER_PLUGIN_SOURCE, encoding="utf-8")
 
-        results_by_func: dict[str, TestCaseResult] = {r.function_name: r for r in results}
         result_list = list(results)
+        results_by_key: dict[str, TestCaseResult] = {}
+        resolved_names = assign_unique_function_names(definitions)
+        if len(resolved_names) == len(result_list):
+            for (module_file, unique_name), res in zip(resolved_names, result_list, strict=True):
+                results_by_key[f"{module_file}::{unique_name}"] = res
+        for res in result_list:
+            results_by_key.setdefault(res.function_name, res)
 
         pytest_args = [
             "-c",
@@ -327,6 +346,8 @@ class ExecutionRunner:
         )
         env["AUTOTEST_SCREENSHOT_DIR"] = str(screenshots_dir)
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
 
         started_mono = time.monotonic()
         run.status = RunStatus.RUNNING
@@ -377,8 +398,41 @@ class ExecutionRunner:
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()
 
+        def _process_output_line(raw_line: str) -> None:
+            stripped = raw_line.rstrip("\r\n")
+            if _EVENT_PREFIX in stripped:
+                before, payload_text = stripped.split(_EVENT_PREFIX, 1)
+                if before.strip():
+                    log_lines.append(before)
+                    self._emit(
+                        on_event,
+                        ExecutionProgressEvent(
+                            event_type=ExecutionEventType.LOG,
+                            run_id=run.id,
+                            message=before,
+                        ),
+                    )
+                self._handle_plugin_event(
+                    run,
+                    payload_text,
+                    results_by_key,
+                    on_result_updated=on_result_updated,
+                    on_event=on_event,
+                )
+            else:
+                log_lines.append(stripped)
+                self._emit(
+                    on_event,
+                    ExecutionProgressEvent(
+                        event_type=ExecutionEventType.LOG,
+                        run_id=run.id,
+                        message=stripped,
+                    ),
+                )
+
         try:
             eof = False
+            proc_exit_mono: float | None = None
             while not eof:
                 if cancel_event is not None and cancel_event.is_set() and not cancelled:
                     cancelled = True
@@ -388,44 +442,31 @@ class ExecutionRunner:
                 try:
                     line = line_queue.get(timeout=0.1)
                 except queue.Empty:
-                    if proc.poll() is not None and not reader_thread.is_alive():
-                        break
+                    if proc.poll() is not None:
+                        if proc_exit_mono is None:
+                            proc_exit_mono = time.monotonic()
+                        if (
+                            not reader_thread.is_alive()
+                            or (time.monotonic() - proc_exit_mono) >= 2.0
+                        ):
+                            break
                     continue
 
                 if line is None:
                     eof = True
                     break
 
-                stripped = line.rstrip("\r\n")
-                if _EVENT_PREFIX in stripped:
-                    before, payload_text = stripped.split(_EVENT_PREFIX, 1)
-                    if before.strip():
-                        log_lines.append(before)
-                        self._emit(
-                            on_event,
-                            ExecutionProgressEvent(
-                                event_type=ExecutionEventType.LOG,
-                                run_id=run.id,
-                                message=before,
-                            ),
-                        )
-                    self._handle_plugin_event(
-                        run,
-                        payload_text,
-                        results_by_func,
-                        on_result_updated=on_result_updated,
-                        on_event=on_event,
-                    )
-                else:
-                    log_lines.append(stripped)
-                    self._emit(
-                        on_event,
-                        ExecutionProgressEvent(
-                            event_type=ExecutionEventType.LOG,
-                            run_id=run.id,
-                            message=stripped,
-                        ),
-                    )
+                _process_output_line(line)
+
+            # Drain any lines queued right as the reader thread exited
+            while True:
+                try:
+                    queued_line = line_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if queued_line is None:
+                    break
+                _process_output_line(queued_line)
 
             reader_thread.join(timeout=2.0)
             try:
@@ -434,9 +475,13 @@ class ExecutionRunner:
                 self._terminate_process(proc)
                 return_code = proc.poll()
         finally:
+            if proc.poll() is None:
+                self._terminate_process(proc)
             if proc.stdout is not None:
                 with contextlib.suppress(Exception):
                     proc.stdout.close()
+            if reader_thread.is_alive():
+                reader_thread.join(timeout=1.0)
 
         # Mark any unfinished tests if cancelled or if pytest exited early (e.g. collection error)
         tail_log = "\n".join(log_lines[-80:]) if log_lines else ""
@@ -533,8 +578,11 @@ class ExecutionRunner:
             return
 
         event_type = str(data.get("type", ""))
+        node_key = str(data.get("node_key", ""))
         func_name = str(data.get("function_name", ""))
-        result = results_by_func.get(func_name)
+        result = results_by_func.get(node_key) if node_key else None
+        if result is None:
+            result = results_by_func.get(func_name)
         if result is None:
             return
 
@@ -622,6 +670,8 @@ class ExecutionRunner:
                     proc.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=2.0)
             else:
                 pgid = os.getpgid(proc.pid)
                 os.killpg(pgid, signal.SIGTERM)
@@ -629,6 +679,8 @@ class ExecutionRunner:
                     proc.wait(timeout=3.0)
                 except subprocess.TimeoutExpired:
                     os.killpg(pgid, signal.SIGKILL)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=2.0)
         except Exception:
             try:
                 proc.kill()

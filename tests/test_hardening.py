@@ -833,3 +833,331 @@ def test_auth_heuristic_selector_codegen_and_artifact_cleanup(
         assert not proj_dir.exists()
     finally:
         ctx.close()
+
+
+def test_round2_critical_and_high_regressions(
+    tmp_settings: AppSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Critical #1-2 and High #3-15 fixes end-to-end."""
+    import ast
+    import logging
+    import sys
+    from datetime import timedelta
+    from pathlib import Path
+
+    from src.config.logging import configure_logging
+    from src.definitions.models import (
+        AssertionType,
+        SelectorCandidate,
+        SelectorStrategy,
+        TestAction,
+        TestAssertion,
+        TestDefinition,
+        TestMode,
+        TestPrerequisite,
+    )
+    from src.definitions.repository import TestDefinitionRepository
+    from src.execution.models import ExecutionMode, RunStatus, TestResultStatus
+    from src.processing import ProcessingEngine
+    from src.processing.models import OutcomeType, ProcessedActionType
+    from src.recording.models import EventSource, EventType, RawEvent
+    from src.recording.page_observer import _ALLOWED_EVENT_TYPES
+    from src.scenarios import Scenario, ScenarioRepository
+
+    # 1. Critical #1: Scenario reorder/split/merge/delete preserve surviving definition FKs
+    ctx = create_app_context(tmp_settings)
+    try:
+        project = ctx.project_service.create_project(ProjectCreate(name="FKApp"))
+        session = ctx.session_service.create_session(project.id, name="FKSession")
+        sc_repo = ScenarioRepository(ctx.database)
+        def_repo = TestDefinitionRepository(ctx.database)
+
+        s1 = Scenario(
+            project_id=project.id,
+            session_id=session.id,
+            name="S1",
+            order_index=1,
+            processed_event_ids=["e1", "e2"],
+        )
+        s2 = Scenario(
+            project_id=project.id,
+            session_id=session.id,
+            name="S2",
+            order_index=2,
+            processed_event_ids=["e3"],
+        )
+        s3 = Scenario(
+            project_id=project.id,
+            session_id=session.id,
+            name="S3",
+            order_index=3,
+            processed_event_ids=["e4"],
+        )
+        sc_repo.replace_for_session(session.id, [s1, s2, s3])
+
+        d1 = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            scenario_id=s1.id,
+            name="Def 1",
+            function_name="test_def_1",
+            order_index=1,
+        )
+        d2 = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            scenario_id=s2.id,
+            name="Def 2",
+            function_name="test_def_2",
+            order_index=2,
+        )
+        d3 = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            scenario_id=s3.id,
+            name="Def 3",
+            function_name="test_def_3",
+            order_index=3,
+        )
+        def_repo.replace_for_session(session.id, [d1, d2, d3])
+
+        # Reorder must preserve all FKs
+        ctx.scenario_service.reorder_scenarios(session.id, [s2.id, s1.id, s3.id])
+        assert def_repo.get(d1.id).scenario_id == s1.id  # type: ignore[union-attr]
+        assert def_repo.get(d2.id).scenario_id == s2.id  # type: ignore[union-attr]
+        assert def_repo.get(d3.id).scenario_id == s3.id  # type: ignore[union-attr]
+
+        # Split must preserve all FKs
+        ctx.scenario_service.split_scenario(s1.id, 1)
+        assert def_repo.get(d1.id).scenario_id == s1.id  # type: ignore[union-attr]
+        assert def_repo.get(d2.id).scenario_id == s2.id  # type: ignore[union-attr]
+        assert def_repo.get(d3.id).scenario_id == s3.id  # type: ignore[union-attr]
+
+        # Delete s3 must preserve d1 and d2 FKs while nulling only d3
+        ctx.scenario_service.delete_scenario(s3.id)
+        assert def_repo.get(d1.id).scenario_id == s1.id  # type: ignore[union-attr]
+        assert def_repo.get(d2.id).scenario_id == s2.id  # type: ignore[union-attr]
+        assert def_repo.get(d3.id).scenario_id is None  # type: ignore[union-attr]
+
+        # 2. Critical #2: Duplicate & cross-module function names all execute & map cleanly
+        dup_a = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Dup Same",
+            function_name="test_dup_same",
+            mode=TestMode.INDEPENDENT,
+            order_index=1,
+        )
+        dup_b = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Dup Same Copy",
+            function_name="test_dup_same",
+            mode=TestMode.INDEPENDENT,
+            order_index=2,
+        )
+        dup_j = TestDefinition(
+            project_id=project.id,
+            session_id=session.id,
+            name="Dup Same Journey",
+            function_name="test_dup_same",
+            mode=TestMode.JOURNEY,
+            order_index=3,
+        )
+        def_repo.replace_for_session(session.id, [dup_a, dup_b, dup_j])
+        run, results = ctx.execution_service.execute_definitions(
+            session.id,
+            [dup_a.id, dup_b.id, dup_j.id],
+            ExecutionMode.INDEPENDENT,
+        )
+        assert run.status == RunStatus.PASSED
+        assert run.passed_count == 3
+        assert all(r.status == TestResultStatus.PASSED for r in results)
+        assert [r.function_name for r in results] == [
+            "test_dup_same",
+            "test_dup_same_2",
+            "test_dup_same",
+        ]
+    finally:
+        ctx.close()
+
+    # 3. High #3 & #5: PageObserver allows NAVIGATION; ProcessingEngine preserves reload,
+    # ignores tab_switch, and deduplicates click-triggered navigation outcomes
+    assert EventType.NAVIGATION in _ALLOWED_EVENT_TYPES
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    nav_events = [
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.NAVIGATION,
+            source=EventSource.PLAYWRIGHT,
+            timestamp=t0,
+            sequence_no=1,
+            payload={"url": "https://example.com/a", "navigation_type": "navigate"},
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.NAVIGATION,
+            source=EventSource.PLAYWRIGHT,
+            timestamp=t0 + timedelta(milliseconds=300),
+            sequence_no=2,
+            payload={"url": "https://example.com/a", "navigation_type": "reload"},
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.NAVIGATION,
+            source=EventSource.PAGE_OBSERVER,
+            timestamp=t0 + timedelta(milliseconds=400),
+            sequence_no=3,
+            payload={"url": "https://example.com/a", "navigation_type": "tab_switch"},
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.CLICK,
+            source=EventSource.PAGE_OBSERVER,
+            timestamp=t0 + timedelta(milliseconds=500),
+            sequence_no=4,
+            target={"tag": "a", "text": "Go B"},
+            payload={},
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.NAVIGATION,
+            source=EventSource.PLAYWRIGHT,
+            timestamp=t0 + timedelta(milliseconds=600),
+            sequence_no=5,
+            payload={"url": "https://example.com/b", "navigation_type": "navigate"},
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.NAVIGATION,
+            source=EventSource.PLAYWRIGHT,
+            timestamp=t0 + timedelta(milliseconds=650),
+            sequence_no=6,
+            payload={"url": "https://example.com/b", "title": "Page B"},
+        ),
+    ]
+    proc = ProcessingEngine().process("s1", nav_events)
+    assert len(proc.processed_events) == 3  # navigate + reload + click
+    click_outcomes = [
+        o for o in proc.processed_events[2].outcomes if o.outcome_type == OutcomeType.NAVIGATION
+    ]
+    assert len(click_outcomes) == 1
+    assert click_outcomes[0].details["title"] == "Page B"
+
+    # 4. High #9, #10, #11, #13: Multi-tab stack, auth setup_url guard, docstring escaping,
+    # and subset auth_context_definitions
+    gen = PytestPlaywrightGenerator()
+    tab_def = TestDefinition(
+        project_id="p1",
+        session_id="s1",
+        name=r'Flow C:\Users\demo "Quoted"',
+        description=r"Handles C:\temp\file",
+        function_name="test_tabs_and_docs",
+        mode=TestMode.INDEPENDENT,
+        order_index=2,
+        prerequisites=[
+            TestPrerequisite(
+                name="entry_url",
+                description="Start on app",
+                setup_url="https://example.com/app",
+            ),
+            TestPrerequisite(
+                name="authenticated_session",
+                description="Use authenticated session",
+                fixture_name="authenticated_page",
+            ),
+        ],
+        actions=[
+            TestAction(
+                id="act-open",
+                order_index=1,
+                action_type=ProcessedActionType.OPEN_TAB,
+                summary="Open tab",
+                url="https://example.com/popup",
+            ),
+            TestAction(
+                id="act-click-new",
+                order_index=2,
+                action_type=ProcessedActionType.CLICK,
+                summary="Click popup button",
+                selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="popup-btn"),
+            ),
+            TestAction(
+                id="act-close",
+                order_index=3,
+                action_type=ProcessedActionType.CLOSE_TAB,
+                summary="Close tab",
+            ),
+            TestAction(
+                id="act-click-orig",
+                order_index=4,
+                action_type=ProcessedActionType.CLICK,
+                summary="Click main button",
+                selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="main-btn"),
+            ),
+        ],
+        assertions=[
+            TestAssertion(
+                order_index=1,
+                after_action_id="act-click-new",
+                assertion_type=AssertionType.TEXT_VISIBLE,
+                description="Popup text",
+                expected="Saved",
+            )
+        ],
+    )
+    login_def = TestDefinition(
+        project_id="p1",
+        session_id="s1",
+        name="User Login",
+        function_name="test_user_login",
+        mode=TestMode.INDEPENDENT,
+        order_index=1,
+        actions=[
+            TestAction(
+                order_index=1,
+                action_type=ProcessedActionType.CLICK,
+                summary="Sign in",
+                selector=SelectorCandidate(strategy=SelectorStrategy.TEST_ID, value="login-btn"),
+            )
+        ],
+    )
+    mod_src = gen.render_test_module([tab_def], module_doc='Suite for "Checkout"')
+    ast.parse(mod_src)
+    assert "if authenticated_page.url.rstrip('/') != 'https://example.com/app':" in mod_src
+    assert "new_page.get_by_test_id('popup-btn').click()" in mod_src
+    assert "expect(new_page.get_by_text('Saved')).to_be_visible()" in mod_src
+    assert "new_page.close()" in mod_src
+    assert "authenticated_page.get_by_test_id('main-btn').click()" in mod_src
+
+    subset_conftest = gen.render_conftest(
+        [tab_def],
+        auth_context_definitions=[login_def, tab_def],
+    )
+    ast.parse(subset_conftest.content)
+    assert "def _perform_auth_setup(page: Page) -> None:" in subset_conftest.content
+
+    # 5. High #7 & #8: configure_logging tolerates sys.stderr=None; spec bundles pytest_base_url
+    monkeypatch.setattr(sys, "stderr", None)
+    configured = configure_logging(tmp_settings)
+    assert all(
+        not isinstance(h, logging.StreamHandler) or hasattr(h, "baseFilename")
+        for h in configured.handlers
+    )
+    spec_text = (Path(__file__).resolve().parent.parent / "packaging" / "autotest.spec").read_text(
+        encoding="utf-8"
+    )
+    assert 'collect_submodules("pytest_base_url")' in spec_text

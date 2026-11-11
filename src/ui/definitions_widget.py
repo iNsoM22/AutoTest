@@ -923,18 +923,25 @@ class DefinitionsWidget(QWidget):
             return
         self.copy_status_label.setText(f"Exported {len(written)} file(s) to {target_dir}.")
 
+    def set_external_busy(self, busy: bool) -> None:
+        """Lock/unlock editing controls while another tab holds an active worker."""
+        if getattr(self, "_external_busy", False) != busy:
+            self._external_busy = busy
+            self._update_controls()
+
     def _update_controls(self) -> None:
         has_session = self._session_id is not None
+        busy = getattr(self, "_external_busy", False)
         selected = self._selected_definitions()
         single = len(selected) == 1
         defn = selected[0] if single else None
 
-        self.generate_btn.setEnabled(has_session)
-        self.include_journey_checkbox.setEnabled(has_session)
-        self.rename_def_btn.setEnabled(single)
-        self.edit_details_btn.setEnabled(single)
-        self.toggle_def_btn.setEnabled(single)
-        self.delete_def_btn.setEnabled(single)
+        self.generate_btn.setEnabled(has_session and not busy)
+        self.include_journey_checkbox.setEnabled(has_session and not busy)
+        self.rename_def_btn.setEnabled(single and not busy)
+        self.edit_details_btn.setEnabled(single and not busy)
+        self.toggle_def_btn.setEnabled(single and not busy)
+        self.delete_def_btn.setEnabled(single and not busy)
         if defn is not None:
             self.toggle_def_btn.setText("Exclude" if defn.included else "Include")
         else:
@@ -942,20 +949,20 @@ class DefinitionsWidget(QWidget):
 
         action_row = self.actions_table.currentRow()
         has_action = defn is not None and 0 <= action_row < len(defn.actions)
-        self.edit_selector_btn.setEnabled(has_action)
-        self.edit_value_btn.setEnabled(has_action)
-        self.move_action_up_btn.setEnabled(has_action and action_row > 0)
+        self.edit_selector_btn.setEnabled(has_action and not busy)
+        self.edit_value_btn.setEnabled(has_action and not busy)
+        self.move_action_up_btn.setEnabled(has_action and action_row > 0 and not busy)
         self.move_action_down_btn.setEnabled(
-            has_action and defn is not None and action_row < len(defn.actions) - 1
+            has_action and defn is not None and action_row < len(defn.actions) - 1 and not busy
         )
-        self.delete_action_btn.setEnabled(has_action)
+        self.delete_action_btn.setEnabled(has_action and not busy)
 
         assertion_row = self.assertions_table.currentRow()
         has_assertion = defn is not None and 0 <= assertion_row < len(defn.assertions)
-        self.add_assertion_btn.setEnabled(single)
-        self.toggle_assertion_btn.setEnabled(has_assertion)
-        self.edit_assertion_btn.setEnabled(has_assertion)
-        self.delete_assertion_btn.setEnabled(has_assertion)
+        self.add_assertion_btn.setEnabled(single and not busy)
+        self.toggle_assertion_btn.setEnabled(has_assertion and not busy)
+        self.edit_assertion_btn.setEnabled(has_assertion and not busy)
+        self.delete_assertion_btn.setEnabled(has_assertion and not busy)
 
         self.copy_test_btn.setEnabled(single)
         self.copy_scenario_btn.setEnabled(defn is not None and defn.scenario_id is not None)
