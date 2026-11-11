@@ -80,7 +80,8 @@
         }
       }
       if (matchedTestId) {
-        parts.unshift(`${tag}[${matchedTestAttr}="${matchedTestId.replace(/"/g, '\\"')}"]`);
+        const escapedId = matchedTestId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+        parts.unshift(`${tag}[${matchedTestAttr}="${escapedId}"]`);
         break;
       }
       let selector = tag;
@@ -225,9 +226,11 @@
         payload.checked = Boolean(el.checked);
         payload.value = sensitive ? "[REDACTED]" : String(el.value || "");
       } else if (tag === "select") {
-        payload.value = String(el.value || "");
+        payload.value = sensitive ? "[REDACTED]" : String(el.value || "");
         const selected = el.options && el.options[el.selectedIndex];
-        if (selected) payload.selected_text = cleanText(selected.text);
+        if (selected) {
+          payload.selected_text = sensitive ? "[REDACTED]" : cleanText(selected.text);
+        }
       } else {
         payload.value = sensitive ? "[REDACTED]" : String(el.value || "");
       }
@@ -297,11 +300,14 @@
   document.addEventListener(
     "mouseout",
     (event) => {
+      if (lastHovered && event.relatedTarget && lastHovered.contains(event.relatedTarget)) {
+        return;
+      }
       if (hoverTimer !== null) {
         clearTimeout(hoverTimer);
         hoverTimer = null;
       }
-      if (event.target === lastHovered) {
+      if (lastHovered && (!event.relatedTarget || !lastHovered.contains(event.relatedTarget))) {
         lastHovered = null;
       }
     },
@@ -401,9 +407,10 @@
     if (!el || el.nodeType !== 1 || mutationSummary.notable.length >= 5) return;
     const attr = rec.attributeName || "";
     const isDirectAttr = NOTABLE_ATTRS.has(attr);
+    const classStr = el.getAttribute("class") || "";
     const isNotableClass =
       attr === "class" &&
-      (VISIBILITY_CLASS_RE.test(el.className || "") ||
+      (VISIBILITY_CLASS_RE.test(classStr) ||
         VISIBILITY_CLASS_RE.test(rec.oldValue || "") ||
         Boolean(el.id) ||
         (el.matches && el.matches(NOTABLE_MUTATION_SELECTOR)));
@@ -526,6 +533,11 @@
     });
     observeRoot(document.documentElement);
   }
+
+  window.addEventListener("pagehide", () => {
+    flushPendingInput();
+    flushMutations();
+  });
 
   if (document.documentElement) {
     startMutationObserver();

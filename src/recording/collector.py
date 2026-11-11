@@ -107,4 +107,9 @@ class EventCollector:
         return self._persist_batch(batch)
 
     def _persist_batch(self, batch: list[RawEvent]) -> int:
-        return self._repository.insert_batch(batch)
+        try:
+            return self._repository.insert_batch(batch)
+        except Exception:
+            with self._lock:
+                self._buffer = batch + self._buffer
+            raise

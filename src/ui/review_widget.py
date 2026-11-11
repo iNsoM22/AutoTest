@@ -222,11 +222,11 @@ class ReviewWidget(QWidget):
         """Load persisted processed events and scenarios for the given session."""
         self._session_id = session_id
         self._session_name = session_name
+        self._uncorrelated_outcomes = []
         if session_id is None:
             self._scenarios = []
             self._timeline = []
             self._visible_events = []
-            self._uncorrelated_outcomes = []
             self.scenarios_list.clear()
             self.timeline_table.setRowCount(0)
             self.evidence_inspector.clear()
@@ -303,7 +303,12 @@ class ReviewWidget(QWidget):
         if session_id == self._session_id:
             QMessageBox.warning(self, "Processing Failed", error_message)
 
-    def _reload_from_storage(self, select_scenario_id: str | None = None) -> None:
+    def _reload_from_storage(
+        self,
+        select_scenario_id: str | None = None,
+        *,
+        emit_changed: bool = False,
+    ) -> None:
         if self._session_id is None:
             return
         self._timeline = self._scenario_service.get_timeline(self._session_id)
@@ -318,6 +323,8 @@ class ReviewWidget(QWidget):
 
         self._render_scenarios(select_index=select_idx)
         self._refresh_timeline_table()
+        if emit_changed:
+            self.scenarios_changed.emit(self._session_id)
         label = self._session_name or self._session_id[:8]
         if self._timeline or self._scenarios:
             self.summary_label.setText(
@@ -453,7 +460,7 @@ class ReviewWidget(QWidget):
         except ScenarioError as exc:
             QMessageBox.warning(self, "Could Not Rename Scenario", str(exc))
             return
-        self._reload_from_storage(select_scenario_id=updated.id)
+        self._reload_from_storage(select_scenario_id=updated.id, emit_changed=True)
 
     def _on_toggle_include(self) -> None:
         selected = self._selected_scenarios()
@@ -467,7 +474,7 @@ class ReviewWidget(QWidget):
         except ScenarioError as exc:
             QMessageBox.warning(self, "Could Not Update Scenario", str(exc))
             return
-        self._reload_from_storage(select_scenario_id=updated.id)
+        self._reload_from_storage(select_scenario_id=updated.id, emit_changed=True)
 
     def _on_delete_scenario(self) -> None:
         selected = self._selected_scenarios()
@@ -479,7 +486,7 @@ class ReviewWidget(QWidget):
         except ScenarioError as exc:
             QMessageBox.warning(self, "Could Not Delete Scenario", str(exc))
             return
-        self._reload_from_storage()
+        self._reload_from_storage(emit_changed=True)
 
     def _on_merge_scenarios(self) -> None:
         selected = self._selected_scenarios()
@@ -490,7 +497,7 @@ class ReviewWidget(QWidget):
         except ScenarioError as exc:
             QMessageBox.warning(self, "Could Not Merge Scenarios", str(exc))
             return
-        self._reload_from_storage(select_scenario_id=merged.id)
+        self._reload_from_storage(select_scenario_id=merged.id, emit_changed=True)
 
     def _on_split_scenario(self) -> None:
         selected = self._selected_scenarios()
@@ -510,7 +517,7 @@ class ReviewWidget(QWidget):
         except ScenarioError as exc:
             QMessageBox.warning(self, "Could Not Split Scenario", str(exc))
             return
-        self._reload_from_storage(select_scenario_id=left.id)
+        self._reload_from_storage(select_scenario_id=left.id, emit_changed=True)
 
     def _on_move_scenario(self, delta: int) -> None:
         if self._session_id is None:
@@ -530,7 +537,7 @@ class ReviewWidget(QWidget):
         except ScenarioError as exc:
             QMessageBox.warning(self, "Could Not Reorder Scenarios", str(exc))
             return
-        self._reload_from_storage(select_scenario_id=scenario.id)
+        self._reload_from_storage(select_scenario_id=scenario.id, emit_changed=True)
 
     def _update_controls(self) -> None:
         has_session = self._session_id is not None

@@ -115,13 +115,16 @@ class ScenarioDetector:
                     has_user_action = True
                 if self._closes_boundary(event, current_path):
                     boundary_closed = True
+                outcome_path = _nav_outcome_path(event)
+                if outcome_path:
+                    current_path = outcome_path
                 continue
 
             prev = current[-1]
             idle_gap = (event.started_at - prev.ended_at).total_seconds()
             nav_path = (
                 _url_path(str(event.payload.get("url", "")))
-                if event.action_type == ProcessedActionType.NAVIGATE
+                if event.action_type in (ProcessedActionType.NAVIGATE, ProcessedActionType.OPEN_TAB)
                 else ""
             )
 
@@ -150,6 +153,10 @@ class ScenarioDetector:
                     has_user_action = True
                 if self._closes_boundary(event, current_path):
                     boundary_closed = True
+
+            outcome_path = _nav_outcome_path(event)
+            if outcome_path:
+                current_path = outcome_path
 
         if current:
             groups.append(current)

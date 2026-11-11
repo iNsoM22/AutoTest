@@ -131,6 +131,7 @@ class ExecutionService:
                 extra_env=extra_env,
                 auth_context_definitions=all_defs,
                 cancel_event=cancel_event,
+                on_run_updated=self._execution_repo.update_run,
                 on_result_updated=self._execution_repo.update_result,
                 on_event=on_event,
             )
@@ -143,6 +144,9 @@ class ExecutionService:
                     self._execution_repo.update_result(res)
             run.status = RunStatus.FAILED
             run.ended_at = datetime.now(UTC)
+            run.duration_ms = max(
+                0, int(round((run.ended_at - run.started_at).total_seconds() * 1000))
+            )
             run.passed_count = sum(
                 1 for r in initial_results if r.status == TestResultStatus.PASSED
             )

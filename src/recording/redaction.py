@@ -146,7 +146,7 @@ def redact_target_and_payload(
 
     if is_sensitive_target:
         redacted_any = False
-        for field in ("value", "text"):
+        for field in ("value", "text", "selected_text"):
             if field in clean_payload and clean_payload[field]:
                 clean_payload[field] = REDACTED_VALUE
                 redacted_any = True

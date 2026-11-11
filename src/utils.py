@@ -30,6 +30,8 @@ def target_label(target: Mapping[str, Any], *, default: str = "element") -> str:
         "tag",
     ):
         val = target.get(key)
-        if val:
-            return str(val).strip()
+        if val is not None:
+            cleaned = str(val).strip()
+            if cleaned:
+                return cleaned
     return default

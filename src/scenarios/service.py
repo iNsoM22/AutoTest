@@ -53,13 +53,14 @@ class ScenarioService:
         engine = ProcessingEngine(config=config)
         result = engine.process(session_id, raw_events)
 
-        self._processed_event_repo.replace_for_session(session_id, result.processed_events)
         scenarios = self._detector.detect(
             project_id=session.project_id,
             session_id=session_id,
             processed_events=result.processed_events,
         )
-        self._scenario_repo.replace_for_session(session_id, scenarios)
+        with self._scenario_repo.database.transaction():
+            self._processed_event_repo.replace_for_session(session_id, result.processed_events)
+            self._scenario_repo.replace_for_session(session_id, scenarios)
         return result, scenarios
 
     def get_timeline(self, session_id: str) -> list[ProcessedEvent]:

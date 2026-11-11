@@ -364,9 +364,11 @@ class MainWindow(QMainWindow):
             self._active_worker is not None or self._is_execution_running() or self._is_processing()
         )
 
-    def _on_scenarios_changed(self, _session_id: str) -> None:
+    def _on_scenarios_changed(self, session_id: str) -> None:
         if self.definitions_widget is not None:
-            self.definitions_widget._reload_from_storage()
+            self.definitions_widget.refresh(session_id)
+        if self.execution_widget is not None and not self.execution_widget.is_running:
+            self.execution_widget.refresh()
 
     def _on_definitions_changed(self, _session_id: str) -> None:
         if self.execution_widget is not None and not self.execution_widget.is_running:
@@ -427,6 +429,8 @@ class MainWindow(QMainWindow):
             self._clear_session_tabs()
 
         self.project_title_label.setText(project.name)
+        if self.definitions_widget is not None:
+            self.definitions_widget.set_base_url(project.base_url)
         meta_parts = [p for p in (project.base_url, project.description) if p]
         self.project_meta_label.setText(" — ".join(meta_parts) if meta_parts else "No details yet.")
         if not is_busy:
@@ -687,7 +691,16 @@ class MainWindow(QMainWindow):
         except ProjectError:
             logger.debug("Session %s already in terminal state", session_id)
         self._cleanup_worker()
-        self._bind_session_tabs(session_id)
+        session_name = ""
+        for row_idx in range(self.sessions_table.rowCount()):
+            item = self.sessions_table.item(row_idx, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == session_id:
+                session_name = item.text()
+                self.sessions_table.blockSignals(True)
+                self.sessions_table.selectRow(row_idx)
+                self.sessions_table.blockSignals(False)
+                break
+        self._bind_session_tabs(session_id, session_name)
         if (
             self.review_widget is not None
             and self._event_repository.count_by_session(session_id) > 0

@@ -293,6 +293,7 @@ class ExecutionRunner:
         extra_env: dict[str, str] | None = None,
         auth_context_definitions: Sequence[TestDefinition] | None = None,
         cancel_event: threading.Event | None = None,
+        on_run_updated: Callable[[TestRun], Any] | None = None,
         on_result_updated: Callable[[TestCaseResult], Any] | None = None,
         on_event: ProgressCallback | None = None,
     ) -> tuple[TestRun, list[TestCaseResult]]:
@@ -351,6 +352,8 @@ class ExecutionRunner:
 
         started_mono = time.monotonic()
         run.status = RunStatus.RUNNING
+        if on_run_updated is not None:
+            on_run_updated(run)
         self._emit(
             on_event,
             ExecutionProgressEvent(
@@ -369,8 +372,9 @@ class ExecutionRunner:
         popen_kwargs: dict[str, Any] = {
             "cwd": str(suite_dir),
             "env": env,
+            "stdin": subprocess.DEVNULL,
             "stdout": subprocess.PIPE,
-            "stderr": subprocess.STDOUT,
+            "stderr": subprocess.PIPE,
             "text": True,
             "encoding": "utf-8",
             "errors": "replace",
@@ -385,22 +389,23 @@ class ExecutionRunner:
 
         proc = subprocess.Popen(cmd, **popen_kwargs)
 
-        line_queue: queue.Queue[str | None] = queue.Queue()
+        line_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
 
-        def _reader() -> None:
-            assert proc.stdout is not None
+        def _reader(stream: Any, stream_name: str) -> None:
             try:
-                for raw_line in proc.stdout:
-                    line_queue.put(raw_line)
+                for raw_line in stream:
+                    line_queue.put((stream_name, raw_line))
             finally:
                 line_queue.put(None)
 
-        reader_thread = threading.Thread(target=_reader, daemon=True)
-        reader_thread.start()
+        stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
+        stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
 
-        def _process_output_line(raw_line: str) -> None:
+        def _process_output_line(stream_name: str, raw_line: str) -> None:
             stripped = raw_line.rstrip("\r\n")
-            if _EVENT_PREFIX in stripped:
+            if stream_name == "stdout" and _EVENT_PREFIX in stripped:
                 before, payload_text = stripped.split(_EVENT_PREFIX, 1)
                 if before.strip():
                     log_lines.append(before)
@@ -431,44 +436,43 @@ class ExecutionRunner:
                 )
 
         try:
-            eof = False
+            eof_count = 0
             proc_exit_mono: float | None = None
-            while not eof:
+            while eof_count < 2:
                 if cancel_event is not None and cancel_event.is_set() and not cancelled:
                     cancelled = True
                     log_lines.append("[AutoTest] Cancellation requested — stopping Pytest...")
                     self._terminate_process(proc)
 
                 try:
-                    line = line_queue.get(timeout=0.1)
+                    item = line_queue.get(timeout=0.1)
                 except queue.Empty:
                     if proc.poll() is not None:
                         if proc_exit_mono is None:
                             proc_exit_mono = time.monotonic()
-                        if (
-                            not reader_thread.is_alive()
-                            or (time.monotonic() - proc_exit_mono) >= 2.0
-                        ):
+                        readers_alive = stdout_thread.is_alive() or stderr_thread.is_alive()
+                        if not readers_alive or (time.monotonic() - proc_exit_mono) >= 2.0:
                             break
                     continue
 
-                if line is None:
-                    eof = True
-                    break
+                if item is None:
+                    eof_count += 1
+                    continue
 
-                _process_output_line(line)
+                _process_output_line(item[0], item[1])
 
-            # Drain any lines queued right as the reader thread exited
+            # Drain any lines queued right as the reader threads exited
             while True:
                 try:
-                    queued_line = line_queue.get_nowait()
+                    queued_item = line_queue.get_nowait()
                 except queue.Empty:
                     break
-                if queued_line is None:
-                    break
-                _process_output_line(queued_line)
+                if queued_item is None:
+                    continue
+                _process_output_line(queued_item[0], queued_item[1])
 
-            reader_thread.join(timeout=2.0)
+            stdout_thread.join(timeout=2.0)
+            stderr_thread.join(timeout=2.0)
             try:
                 return_code = proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
@@ -477,11 +481,13 @@ class ExecutionRunner:
         finally:
             if proc.poll() is None:
                 self._terminate_process(proc)
-            if proc.stdout is not None:
-                with contextlib.suppress(Exception):
-                    proc.stdout.close()
-            if reader_thread.is_alive():
-                reader_thread.join(timeout=1.0)
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(Exception):
+                        pipe.close()
+            for reader in (stdout_thread, stderr_thread):
+                if reader.is_alive():
+                    reader.join(timeout=1.0)
 
         # Mark any unfinished tests if cancelled or if pytest exited early (e.g. collection error)
         tail_log = "\n".join(log_lines[-80:]) if log_lines else ""

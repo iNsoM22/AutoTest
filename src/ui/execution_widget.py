@@ -272,9 +272,10 @@ class ExecutionWidget(QWidget):
         if self._session_id is None:
             return
         self._definitions = self._definition_service.list_by_session(self._session_id)
-        self._populate_tests_list()
+        self._populate_tests_list(preserve_checks=True)
         self._runs = self._execution_service.list_runs_by_session(self._session_id)
-        self._populate_history_list()
+        selected_run_id = self._current_run.id if self._current_run is not None else None
+        self._populate_history_list(select_run_id=selected_run_id)
         self._update_controls()
 
     def shutdown(self) -> None:
@@ -295,14 +296,23 @@ class ExecutionWidget(QWidget):
             self._active_run_session_id = None
             self._active_run_id = None
 
-    def _populate_tests_list(self) -> None:
+    def _populate_tests_list(self, *, preserve_checks: bool = False) -> None:
+        prior_checks: dict[str, Qt.CheckState] = {}
+        if preserve_checks:
+            for idx in range(self.tests_list.count()):
+                existing = self.tests_list.item(idx)
+                if existing is not None:
+                    prior_checks[str(existing.data(Qt.ItemDataRole.UserRole))] = (
+                        existing.checkState()
+                    )
         self.tests_list.clear()
         for defn in self._definitions:
             tag = "journey" if defn.mode.value == "journey" else "indep"
             item = QListWidgetItem(f"[{tag}] {defn.name}")
             item.setData(Qt.ItemDataRole.UserRole, defn.id)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if defn.included else Qt.CheckState.Unchecked)
+            default_state = Qt.CheckState.Checked if defn.included else Qt.CheckState.Unchecked
+            item.setCheckState(prior_checks.get(defn.id, default_state))
             self.tests_list.addItem(item)
 
     def _populate_history_list(self, select_run_id: str | None = None) -> None:
@@ -320,9 +330,9 @@ class ExecutionWidget(QWidget):
             self.history_list.addItem(item)
             if select_run_id and run.id == select_run_id:
                 selected_row = idx
-        self.history_list.blockSignals(False)
         if selected_row >= 0:
             self.history_list.setCurrentRow(selected_row)
+        self.history_list.blockSignals(False)
 
     def _selected_definition_ids(self) -> list[str]:
         ids: list[str] = []
@@ -498,6 +508,9 @@ class ExecutionWidget(QWidget):
     def _on_run_failed(self, error_message: str) -> None:
         self._cleanup_worker()
         self.summary_label.setText(f"Execution error: {error_message}")
+        if self._session_id is not None:
+            self._runs = self._execution_service.list_runs_by_session(self._session_id)
+            self._populate_history_list()
         QMessageBox.warning(self, "Execution Error", error_message)
         self._update_controls()
 

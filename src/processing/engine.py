@@ -216,14 +216,19 @@ class ProcessingEngine:
                 return False
             return res_type in _STATIC_RESOURCE_TYPES or res_type == "document"
 
+        if etype == EventType.REQUEST_FAILED:
+            res_type = str(payload.get("resource_type", "")).lower()
+            failure = str(payload.get("failure", "")).lower()
+            return res_type in _STATIC_RESOURCE_TYPES or "err_aborted" in failure
+
         return False
 
     def _build_actions_and_outcomes(
         self,
         events: Sequence[RawEvent],
-    ) -> tuple[list[ProcessedEvent], list[tuple[str | None, CorrelatedOutcome]]]:
+    ) -> tuple[list[ProcessedEvent], list[tuple[str | None, CorrelatedOutcome, datetime]]]:
         actions: list[ProcessedEvent] = []
-        outcomes: list[tuple[str | None, CorrelatedOutcome]] = []
+        outcomes: list[tuple[str | None, CorrelatedOutcome, datetime]] = []
         requests_by_corr: dict[str, RawEvent] = {}
 
         for event in events:
@@ -238,6 +243,7 @@ class ProcessingEngine:
             if etype == EventType.RESPONSE:
                 req = requests_by_corr.pop(event.correlation_id or "", None)
                 raw_ids = [req.id, event.id] if req is not None else [event.id]
+                match_ts = req.timestamp if req is not None else event.timestamp
                 method = str(event.payload.get("method", "GET"))
                 status = int(event.payload.get("status", 0) or 0)
                 url = str(event.payload.get("url", ""))
@@ -259,6 +265,7 @@ class ProcessingEngine:
                             raw_event_ids=raw_ids,
                             timestamp=event.timestamp,
                         ),
+                        match_ts,
                     )
                 )
                 continue
@@ -266,6 +273,7 @@ class ProcessingEngine:
             if etype == EventType.REQUEST_FAILED:
                 req = requests_by_corr.pop(event.correlation_id or "", None)
                 raw_ids = [req.id, event.id] if req is not None else [event.id]
+                match_ts = req.timestamp if req is not None else event.timestamp
                 method = str(event.payload.get("method", "GET"))
                 url = str(event.payload.get("url", ""))
                 failure = str(event.payload.get("failure", "failed"))
@@ -287,6 +295,7 @@ class ProcessingEngine:
                             raw_event_ids=raw_ids,
                             timestamp=event.timestamp,
                         ),
+                        match_ts,
                     )
                 )
                 continue
@@ -313,6 +322,7 @@ class ProcessingEngine:
                             raw_event_ids=[event.id],
                             timestamp=event.timestamp,
                         ),
+                        event.timestamp,
                     )
                 )
                 continue
@@ -329,6 +339,7 @@ class ProcessingEngine:
                             raw_event_ids=[event.id],
                             timestamp=event.timestamp,
                         ),
+                        event.timestamp,
                     )
                 )
                 continue
@@ -345,6 +356,7 @@ class ProcessingEngine:
                             raw_event_ids=[event.id],
                             timestamp=event.timestamp,
                         ),
+                        event.timestamp,
                     )
                 )
                 continue
@@ -357,7 +369,7 @@ class ProcessingEngine:
     def _append_or_merge_action(
         self,
         actions: list[ProcessedEvent],
-        outcomes: list[tuple[str | None, CorrelatedOutcome]],
+        outcomes: list[tuple[str | None, CorrelatedOutcome, datetime]],
         event: RawEvent,
     ) -> None:
         etype = event.event_type
@@ -409,7 +421,7 @@ class ProcessingEngine:
                 <= self._config.correlation_window_ms
             ):
                 # Deduplicate repeated navigation outcomes to the same URL for the same trigger
-                for existing_pid, existing_out in reversed(outcomes):
+                for existing_pid, existing_out, _existing_ts in reversed(outcomes):
                     if existing_out.timestamp < last.ended_at:
                         break
                     if (
@@ -436,6 +448,7 @@ class ProcessingEngine:
                             raw_event_ids=[event.id],
                             timestamp=event.timestamp,
                         ),
+                        event.timestamp,
                     )
                 )
                 return
@@ -562,21 +575,21 @@ class ProcessingEngine:
     def _correlate_outcomes(
         self,
         actions: list[ProcessedEvent],
-        pending_outcomes: Sequence[tuple[str | None, CorrelatedOutcome]],
+        pending_outcomes: Sequence[tuple[str | None, CorrelatedOutcome, datetime]],
     ) -> list[CorrelatedOutcome]:
         uncorrelated: list[CorrelatedOutcome] = []
         window_ms = float(self._config.correlation_window_ms)
         action_end_times = {id(action): action.ended_at for action in actions}
 
-        for page_id, outcome in pending_outcomes:
+        for page_id, outcome, match_ts in pending_outcomes:
             candidate: ProcessedEvent | None = None
             for action in reversed(actions):
                 if action.page_id != page_id:
                     continue
-                if action.started_at > outcome.timestamp:
+                if action.started_at > match_ts:
                     continue
                 action_end = action_end_times[id(action)]
-                delta = _ms_between(action_end, outcome.timestamp)
+                delta = _ms_between(action_end, match_ts)
                 if delta <= window_ms:
                     candidate = action
                 break

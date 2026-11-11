@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -535,7 +536,11 @@ def parse_selector_expression(expression: str) -> SelectorCandidate:
                 raise ValueError("Role name in 'role=' selector cannot be empty.")
             name_clean = name_part[:-1].strip()
             if len(name_clean) >= 2 and name_clean[0] == name_clean[-1] and name_clean[0] in "'\"":
-                name_clean = name_clean[1:-1]
+                try:
+                    evaluated = ast.literal_eval(name_clean)
+                    name_clean = evaluated if isinstance(evaluated, str) else name_clean[1:-1]
+                except (ValueError, SyntaxError):
+                    name_clean = name_clean[1:-1]
             return SelectorCandidate(
                 strategy=SelectorStrategy.ROLE,
                 value=f"{role_clean}:{name_clean}",

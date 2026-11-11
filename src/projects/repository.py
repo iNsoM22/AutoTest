@@ -144,6 +144,21 @@ class ProjectRepository:
             cursor = conn.execute("DELETE FROM projects WHERE id = ?;", (project_id,))
             return cursor.rowcount > 0
 
+    def has_active_sessions(self, project_id: str) -> bool:
+        row = (
+            self._db.connect()
+            .execute(
+                """
+                SELECT 1 FROM recording_sessions
+                WHERE project_id = ? AND status = ?
+                LIMIT 1;
+                """,
+                (project_id, SessionStatus.ACTIVE.value),
+            )
+            .fetchone()
+        )
+        return row is not None
+
 
 class SessionRepository:
     """Persistence operations for `recording_sessions` and `browser_pages`."""
@@ -276,6 +291,19 @@ class SessionRepository:
                 WHERE status = ?;
                 """,
                 (SessionStatus.INTERRUPTED.value, ts, ts, SessionStatus.ACTIVE.value),
+            )
+            return cursor.rowcount
+
+    def close_open_pages(self, session_id: str, closed_at: datetime) -> int:
+        ts = _format_dt(closed_at)
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE browser_pages
+                SET closed_at = COALESCE(closed_at, ?)
+                WHERE session_id = ? AND closed_at IS NULL;
+                """,
+                (ts, session_id),
             )
             return cursor.rowcount
 

@@ -346,7 +346,24 @@ class DefinitionsWidget(QWidget):
         self._update_controls()
         self.definitions_changed.emit(self._session_id)
 
-    def _reload_from_storage(self, select_definition_id: str | None = None) -> None:
+    def set_base_url(self, base_url: str) -> None:
+        """Update the project base URL used for fixture copy and suite export."""
+        self._base_url = base_url
+
+    def refresh(self, session_id: str | None = None) -> None:
+        """Reload persisted definitions if the active session matches `session_id`."""
+        if self._session_id is None:
+            return
+        if session_id is not None and session_id != self._session_id:
+            return
+        self._reload_from_storage()
+
+    def _reload_from_storage(
+        self,
+        select_definition_id: str | None = None,
+        *,
+        emit_changed: bool = False,
+    ) -> None:
         if self._session_id is None:
             return
         self._definitions = self._definition_service.list_by_session(self._session_id)
@@ -366,7 +383,7 @@ class DefinitionsWidget(QWidget):
                 f"{label}: No test definitions yet. Click 'Generate from Scenarios'."
             )
         self._update_controls()
-        if select_definition_id is not None and self._session_id is not None:
+        if (emit_changed or select_definition_id is not None) and self._session_id is not None:
             self.definitions_changed.emit(self._session_id)
 
     def _render_definitions_list(self, select_index: int = -1) -> None:
@@ -559,7 +576,7 @@ class DefinitionsWidget(QWidget):
         except TestDefinitionError as exc:
             QMessageBox.warning(self, "Could Not Delete Test", str(exc))
             return
-        self._reload_from_storage()
+        self._reload_from_storage(emit_changed=True)
 
     # --- Action editing handlers ---
 
@@ -819,15 +836,43 @@ class DefinitionsWidget(QWidget):
             self.assertions_table.selectRow(row)
             return
 
-        new_expected, ok = QInputDialog.getText(
-            self,
-            "Edit Assertion Expected Value",
-            "Expected value:",
-            text=assertion.expected,
-        )
-        if not ok:
-            return
-        cleaned = new_expected.strip()
+        if assertion.assertion_type == AssertionType.ELEMENT_CHECKED:
+            choice, ok = QInputDialog.getItem(
+                self,
+                "Edit Checked Assertion",
+                "Expected checked state:",
+                ["true", "false"],
+                0 if assertion.expected.lower() != "false" else 1,
+                False,
+            )
+            if not ok:
+                return
+            cleaned = choice
+        else:
+            new_expected, ok = QInputDialog.getText(
+                self,
+                "Edit Assertion Expected Value",
+                "Expected value:",
+                text=assertion.expected,
+            )
+            if not ok:
+                return
+            cleaned = new_expected.strip()
+            if (
+                assertion.assertion_type
+                in (
+                    AssertionType.TEXT_VISIBLE,
+                    AssertionType.URL_CONTAINS,
+                    AssertionType.URL_EQUALS,
+                )
+                and not cleaned
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Expected Value",
+                    "Expected value cannot be empty for this assertion type.",
+                )
+                return
         new_desc = assertion.description
         if assertion.assertion_type == AssertionType.TEXT_VISIBLE and cleaned:
             new_desc = f"Verify '{cleaned}' is visible"

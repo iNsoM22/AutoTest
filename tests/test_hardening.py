@@ -752,7 +752,7 @@ def test_auth_heuristic_selector_codegen_and_artifact_cleanup(
     alt_primary, _ = build_selector_candidates({"tag": "input", "alt": "Submit\nNow"})
     assert alt_primary is not None
     assert alt_primary.strategy == SelectorStrategy.CSS
-    assert alt_primary.value.startswith('input[alt="Submit\\nNow"]')
+    assert alt_primary.value.startswith('input[alt="Submit\\00000aNow"]')
 
     gen = PytestPlaywrightGenerator()
     # Duplicate function names deduplicated, OPEN_TAB/CLOSE_TAB/SCROLL codegen, no unused expect
@@ -1161,3 +1161,267 @@ def test_round2_critical_and_high_regressions(
         encoding="utf-8"
     )
     assert 'collect_submodules("pytest_base_url")' in spec_text
+
+
+def test_round2_medium_and_low_regressions(tmp_settings: AppSettings) -> None:
+    """Verify Medium (#19-37) and Low (#38-47) fixes across all subsystems."""
+    import ast
+    from datetime import timedelta
+
+    from src.definitions.builder import parse_selector_expression
+    from src.definitions.models import (
+        AssertionType,
+        SelectorCandidate,
+        SelectorStrategy,
+        TestAction,
+        TestAssertion,
+        TestDefinition,
+        TestExecutionSettings,
+        TestMode,
+    )
+    from src.processing import ProcessingEngine
+    from src.processing.models import (
+        CorrelatedOutcome,
+        OutcomeType,
+        ProcessedActionType,
+        ProcessedEvent,
+    )
+    from src.projects.exceptions import SessionStateError
+    from src.recording.collector import EventCollector
+    from src.recording.models import EventSource, EventType, RawEvent
+    from src.recording.redaction import redact_target_and_payload
+    from src.scenarios.detector import ScenarioDetector
+    from src.utils import target_label
+
+    # #39: target_label skips whitespace-only values
+    assert target_label({"text": "   ", "aria_label": "Save"}) == "Save"
+
+    # #23: sensitive <select> redacts value and selected_text
+    _, clean_sel = redact_target_and_payload(
+        {"tag": "select", "name": "card_type", "autocomplete": "cc-type"},
+        {"value": "4111", "selected_text": "Visa 4111"},
+    )
+    assert clean_sel["value"] == "[REDACTED]"
+    assert clean_sel["selected_text"] == "[REDACTED]"
+    assert clean_sel["redacted"] is True
+
+    # #25 & #26: REQUEST_FAILED static/aborted filtered; slow API correlates by REQUEST timestamp
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    net_raw = [
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.CLICK,
+            source=EventSource.PAGE_OBSERVER,
+            timestamp=t0,
+            sequence_no=1,
+            target={"tag": "button", "text": "Load"},
+            payload={},
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.REQUEST,
+            source=EventSource.PLAYWRIGHT,
+            timestamp=t0 + timedelta(milliseconds=100),
+            sequence_no=2,
+            correlation_id="req-slow",
+            payload={
+                "method": "GET",
+                "url": "https://api.example.com/slow",
+                "resource_type": "fetch",
+            },
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.REQUEST_FAILED,
+            source=EventSource.PLAYWRIGHT,
+            timestamp=t0 + timedelta(milliseconds=150),
+            sequence_no=3,
+            payload={
+                "method": "GET",
+                "url": "https://example.com/logo.png",
+                "resource_type": "image",
+                "failure": "net::ERR_ABORTED",
+            },
+        ),
+        RawEvent(
+            project_id="p1",
+            session_id="s1",
+            page_id="pg1",
+            event_type=EventType.RESPONSE,
+            source=EventSource.PLAYWRIGHT,
+            timestamp=t0 + timedelta(milliseconds=4000),
+            sequence_no=4,
+            correlation_id="req-slow",
+            payload={
+                "method": "GET",
+                "url": "https://api.example.com/slow",
+                "status": 200,
+                "resource_type": "fetch",
+            },
+        ),
+    ]
+    net_res = ProcessingEngine().process("s1", net_raw)
+    assert len(net_res.processed_events) == 1
+    assert len(net_res.processed_events[0].outcomes) == 1
+    assert not net_res.uncorrelated_outcomes
+
+    # #27: ScenarioDetector updates current_path after navigation outcomes
+    ev_a = ProcessedEvent(
+        project_id="p1",
+        session_id="s1",
+        order_index=1,
+        action_type=ProcessedActionType.NAVIGATE,
+        started_at=t0,
+        ended_at=t0,
+        payload={"url": "https://example.com/login"},
+        summary="Navigate to /login",
+    )
+    ev_b = ProcessedEvent(
+        project_id="p1",
+        session_id="s1",
+        order_index=2,
+        action_type=ProcessedActionType.CLICK,
+        started_at=t0 + timedelta(seconds=1),
+        ended_at=t0 + timedelta(seconds=1),
+        target={"tag": "button", "text": "Go"},
+        outcomes=[
+            CorrelatedOutcome(
+                outcome_type=OutcomeType.NAVIGATION,
+                summary="Navigated to /dashboard",
+                details={"url": "https://example.com/dashboard"},
+                timestamp=t0 + timedelta(seconds=1),
+            )
+        ],
+        summary="Click Go",
+    )
+    ev_c = ProcessedEvent(
+        project_id="p1",
+        session_id="s1",
+        order_index=3,
+        action_type=ProcessedActionType.CLICK,
+        started_at=t0 + timedelta(seconds=2),
+        ended_at=t0 + timedelta(seconds=2),
+        target={"tag": "a", "text": "Back to login"},
+        outcomes=[
+            CorrelatedOutcome(
+                outcome_type=OutcomeType.NAVIGATION,
+                summary="Navigated to /login",
+                details={"url": "https://example.com/login"},
+                timestamp=t0 + timedelta(seconds=2),
+            )
+        ],
+        summary="Click Back to login",
+    )
+    ev_d = ProcessedEvent(
+        project_id="p1",
+        session_id="s1",
+        order_index=4,
+        action_type=ProcessedActionType.CLICK,
+        started_at=t0 + timedelta(seconds=3),
+        ended_at=t0 + timedelta(seconds=3),
+        target={"tag": "button", "text": "Retry"},
+        summary="Click Retry",
+    )
+    detected = ScenarioDetector().detect(
+        project_id="p1", session_id="s1", processed_events=[ev_a, ev_b, ev_c, ev_d]
+    )
+    assert len(detected) == 3
+
+    # #29 & #30: <a> without href has no link role; parse_selector_expression round-trips quotes
+    no_href_primary, _ = build_selector_candidates({"tag": "a", "text": "Action"})
+    assert no_href_primary is not None
+    assert no_href_primary.strategy != SelectorStrategy.ROLE
+    with_href_primary, _ = build_selector_candidates({"tag": "a", "href": "/docs", "text": "Docs"})
+    assert with_href_primary is not None
+    assert with_href_primary.strategy == SelectorStrategy.ROLE
+    assert with_href_primary.role == "link"
+
+    tricky_cand = SelectorCandidate(
+        strategy=SelectorStrategy.ROLE,
+        value="role",
+        role="button",
+        name='Say "Hi" & don\'t',
+    )
+    roundtripped = parse_selector_expression(tricky_cand.display())
+    assert roundtripped.name == 'Say "Hi" & don\'t'
+
+    # #31, #33, #40: base_url reads getini, per-test timeout/viewport, safe SCROLL parsing
+    gen = PytestPlaywrightGenerator()
+    t_custom = TestDefinition(
+        project_id="p1",
+        session_id="s1",
+        name="Custom Viewport & Timeout",
+        function_name="test_custom_vp",
+        mode=TestMode.INDEPENDENT,
+        order_index=1,
+        settings=TestExecutionSettings(timeout_ms=7500, viewport_width=800, viewport_height=600),
+        actions=[
+            TestAction(
+                order_index=1,
+                action_type=ProcessedActionType.SCROLL,
+                summary="Bad scroll",
+                value="--10,0",
+            )
+        ],
+        assertions=[
+            TestAssertion(
+                order_index=1,
+                assertion_type=AssertionType.TEXT_VISIBLE,
+                description="Check text",
+                expected="Hello",
+            )
+        ],
+    )
+    t_default = TestDefinition(
+        project_id="p1",
+        session_id="s1",
+        name="Default Viewport",
+        function_name="test_default_vp",
+        mode=TestMode.INDEPENDENT,
+        order_index=2,
+    )
+    suite = gen.generate_suite([t_custom, t_default], base_url="https://example.com")
+    ast.parse(suite.conftest.content)
+    assert 'pytestconfig.getini("base_url")' in suite.conftest.content
+    mod_content = suite.test_files[0].content
+    ast.parse(mod_content)
+    assert "timeout=7500" in mod_content
+    assert "# Bad scroll" in mod_content
+    assert "set_viewport_size({'width': 1280, 'height': 720})" in mod_content
+
+    # #20 & #22: EventCollector re-buffers on failure; SessionService closes pages & guards ACTIVE
+    class _FailingRepo:
+        def insert_batch(self, _batch: list[RawEvent]) -> int:
+            raise RuntimeError("transient lock")
+
+    collector = EventCollector(
+        _FailingRepo(),  # type: ignore[arg-type]
+        project_id="p1",
+        session_id="s1",
+        batch_size=1,
+    )
+    with pytest.raises(RuntimeError, match="transient lock"):
+        collector.record(event_type=EventType.CLICK, source=EventSource.PAGE_OBSERVER)
+    assert collector.buffered_count == 1
+
+    ctx = create_app_context(tmp_settings)
+    try:
+        proj = ctx.project_service.create_project(ProjectCreate(name="ActiveGuard"))
+        sess = ctx.session_service.create_session(proj.id, name="Live")
+        ctx.session_service.start_session(sess.id)
+        ctx.session_service.register_page(sess.id, page_id="pg-open", tab_index=0, url="https://x")
+        with pytest.raises(SessionStateError):
+            ctx.session_service.delete_session(sess.id)
+        with pytest.raises(SessionStateError):
+            ctx.project_service.delete_project(proj.id)
+        ctx.session_service.stop_session(sess.id)
+        pages = ctx.session_service.list_pages(sess.id)
+        assert len(pages) == 1 and pages[0].closed_at is not None
+    finally:
+        ctx.close()

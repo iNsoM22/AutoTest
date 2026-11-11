@@ -153,6 +153,7 @@ class PytestPlaywrightGenerator:
         *,
         function_name: str | None = None,
         shared_browser_context: bool = False,
+        suite_viewport: tuple[int, int] | None = None,
     ) -> str:
         """Render a single Pytest test function body (without module-level imports)."""
         page_fixture = "authenticated_page" if _uses_auth_fixture(definition) else "page"
@@ -182,10 +183,18 @@ class PytestPlaywrightGenerator:
         doc_lines.append('    """')
         lines.extend(doc_lines)
 
-        # Configure default timeout if non-default
-        if definition.settings.timeout_ms != 30000:
+        # Configure per-test timeout (always reset when sharing a context across tests)
+        if definition.settings.timeout_ms != 30000 or shared_browser_context:
             lines.append(
                 f"    {page_fixture}.set_default_timeout({definition.settings.timeout_ms})"
+            )
+
+        # Configure per-test viewport when it differs from the suite-level viewport
+        test_viewport = (definition.settings.viewport_width, definition.settings.viewport_height)
+        if suite_viewport is not None and test_viewport != suite_viewport:
+            lines.append(
+                f"    {page_fixture}.set_viewport_size("
+                f"{{'width': {test_viewport[0]}, 'height': {test_viewport[1]}}})"
             )
 
         # Prerequisites (entry URL if test doesn't start with navigation)
@@ -213,6 +222,7 @@ class PytestPlaywrightGenerator:
             definition.actions,
             page_fixture,
             assertions_by_action=assertions_by_action,
+            timeout_ms=definition.settings.timeout_ms,
         )
         lines.extend(action_lines)
 
@@ -220,7 +230,13 @@ class PytestPlaywrightGenerator:
         for leftover_group in assertions_by_action.values():
             for assertion in leftover_group:
                 emitted_body = True
-                lines.extend(self._render_assertion(assertion, active_page))
+                lines.extend(
+                    self._render_assertion(
+                        assertion,
+                        active_page,
+                        timeout_ms=definition.settings.timeout_ms,
+                    )
+                )
 
         if not emitted_body:
             lines.append("    # No recorded actions in this test definition.")
@@ -234,6 +250,7 @@ class PytestPlaywrightGenerator:
         *,
         module_doc: str = "Generated end-to-end Playwright + Pytest tests.",
         shared_browser_context: bool = False,
+        suite_viewport: tuple[int, int] | None = None,
     ) -> str:
         """Render a complete standalone `.py` test module for one or more definitions."""
         lines: list[str] = [
@@ -273,6 +290,7 @@ class PytestPlaywrightGenerator:
                     definition,
                     function_name=unique_name,
                     shared_browser_context=shared_browser_context,
+                    suite_viewport=suite_viewport,
                 )
             )
 
@@ -344,9 +362,14 @@ class PytestPlaywrightGenerator:
                 "",
                 '@pytest.fixture(scope="session")',
                 "def base_url(pytestconfig: pytest.Config) -> str:",
-                '    """Base URL for the app under test (--base-url, BASE_URL env, or default)."""',
+                '    """Base URL (--base-url, BASE_URL env, pytest.ini, or default)."""',
                 '    cli_url = pytestconfig.getoption("base_url", default="") or ""',
-                f'    return str(cli_url or os.environ.get("BASE_URL", {resolved_base!r}))',
+                "    try:",
+                '        ini_url = pytestconfig.getini("base_url") or ""',
+                "    except ValueError:",
+                '        ini_url = ""',
+                '    env_url = os.environ.get("BASE_URL", "")',
+                f"    return str(cli_url or env_url or ini_url or {resolved_base!r})",
                 "",
                 "",
                 '@pytest.fixture(scope="session")',
@@ -490,6 +513,24 @@ class PytestPlaywrightGenerator:
         independent = [d for d in included if d.mode == TestMode.INDEPENDENT]
         journeys = [d for d in included if d.mode == TestMode.JOURNEY]
 
+        custom_vp = next(
+            (
+                (d.settings.viewport_width, d.settings.viewport_height)
+                for d in included
+                if (d.settings.viewport_width, d.settings.viewport_height) != (1280, 720)
+            ),
+            None,
+        )
+        suite_viewport = (
+            custom_vp
+            if custom_vp is not None
+            else (
+                (included[0].settings.viewport_width, included[0].settings.viewport_height)
+                if included
+                else (1280, 720)
+            )
+        )
+
         test_files: list[GeneratedFile] = []
         if independent:
             test_files.append(
@@ -499,6 +540,7 @@ class PytestPlaywrightGenerator:
                         independent,
                         module_doc="Independent Playwright + Pytest scenario tests.",
                         shared_browser_context=shared_browser_context,
+                        suite_viewport=suite_viewport,
                     ),
                     description=f"{len(independent)} independent scenario test(s).",
                 )
@@ -511,6 +553,7 @@ class PytestPlaywrightGenerator:
                         journeys,
                         module_doc="Complete sequential Playwright + Pytest journey test.",
                         shared_browser_context=shared_browser_context,
+                        suite_viewport=suite_viewport,
                     ),
                     description=f"{len(journeys)} sequential journey test(s).",
                 )
@@ -533,6 +576,7 @@ class PytestPlaywrightGenerator:
         base_page_var: str,
         *,
         assertions_by_action: dict[str | None, list[TestAssertion]] | None = None,
+        timeout_ms: int = 30000,
     ) -> tuple[list[str], str, bool]:
         """Render actions (and paired assertions) while tracking an active-tab page stack."""
         lines: list[str] = []
@@ -561,7 +605,9 @@ class PytestPlaywrightGenerator:
 
             if assertions_by_action is not None:
                 for assertion in assertions_by_action.pop(action.id, []):
-                    lines.extend(self._render_assertion(assertion, page_stack[-1]))
+                    lines.extend(
+                        self._render_assertion(assertion, page_stack[-1], timeout_ms=timeout_ms)
+                    )
 
         return lines, page_stack[-1], emitted_body
 
@@ -595,13 +641,13 @@ class PytestPlaywrightGenerator:
 
         if atype == ProcessedActionType.SCROLL:
             coords = action.value.split(",", 1) if "," in action.value else []
-            if (
-                len(coords) == 2
-                and coords[0].strip().lstrip("-").isdigit()
-                and coords[1].strip().lstrip("-").isdigit()
-            ):
-                sx, sy = int(coords[0].strip()), int(coords[1].strip())
-                lines.append(f"    {page_var}.evaluate('window.scrollTo({sx}, {sy})')")
+            if len(coords) == 2:
+                try:
+                    sx, sy = int(coords[0].strip()), int(coords[1].strip())
+                except ValueError:
+                    lines.append(f"    # {_safe_comment_text(action.summary)}")
+                else:
+                    lines.append(f"    {page_var}.evaluate('window.scrollTo({sx}, {sy})')")
             else:
                 lines.append(f"    # {_safe_comment_text(action.summary)}")
             return lines
@@ -675,7 +721,13 @@ class PytestPlaywrightGenerator:
         )
         return lines
 
-    def _render_assertion(self, assertion: TestAssertion, page_var: str) -> list[str]:
+    def _render_assertion(
+        self,
+        assertion: TestAssertion,
+        page_var: str,
+        *,
+        timeout_ms: int = 30000,
+    ) -> list[str]:
         conf = assertion.confidence.value
         safe_desc = _safe_comment_text(assertion.description)
         if not assertion.enabled:
@@ -687,21 +739,26 @@ class PytestPlaywrightGenerator:
         else:
             lines.append(f"    # Assert [{conf}]: {safe_desc}")
 
+        t_kw = f", timeout={timeout_ms}" if timeout_ms != 30000 else ""
+        t_only = f"timeout={timeout_ms}" if timeout_ms != 30000 else ""
+
         atype = assertion.assertion_type
         if atype == AssertionType.URL_CONTAINS:
             lines.append(
-                f"    expect({page_var}).to_have_url(re.compile(re.escape({assertion.expected!r})))"
+                f"    expect({page_var}).to_have_url("
+                f"re.compile(re.escape({assertion.expected!r})){t_kw})"
             )
         elif atype == AssertionType.URL_EQUALS:
-            lines.append(f"    expect({page_var}).to_have_url({assertion.expected!r})")
+            lines.append(f"    expect({page_var}).to_have_url({assertion.expected!r}{t_kw})")
         elif atype == AssertionType.TEXT_VISIBLE:
             lines.append(
-                f"    expect({page_var}.get_by_text({assertion.expected!r})).to_be_visible()"
+                f"    expect({page_var}.get_by_text({assertion.expected!r}))"
+                f".to_be_visible({t_only})"
             )
         elif atype == AssertionType.ELEMENT_VISIBLE:
             if assertion.selector is not None:
                 loc = _locator_expr(page_var, assertion.selector)
-                lines.append(f"    expect({loc}).to_be_visible()")
+                lines.append(f"    expect({loc}).to_be_visible({t_only})")
             else:
                 lines.append(f"    # TODO: missing selector for assertion: {safe_desc}")
         elif atype == AssertionType.ELEMENT_CHECKED:
@@ -709,13 +766,13 @@ class PytestPlaywrightGenerator:
                 loc = _locator_expr(page_var, assertion.selector)
                 checked = assertion.expected.lower() != "false"
                 method = "to_be_checked" if checked else "not_to_be_checked"
-                lines.append(f"    expect({loc}).{method}()")
+                lines.append(f"    expect({loc}).{method}({t_only})")
             else:
                 lines.append(f"    # TODO: missing selector for assertion: {safe_desc}")
         elif atype == AssertionType.ELEMENT_VALUE:
             if assertion.selector is not None:
                 loc = _locator_expr(page_var, assertion.selector)
-                lines.append(f"    expect({loc}).to_have_value({assertion.expected!r})")
+                lines.append(f"    expect({loc}).to_have_value({assertion.expected!r}{t_kw})")
             else:
                 lines.append(f"    # TODO: missing selector for assertion: {safe_desc}")
         elif atype == AssertionType.NETWORK_RESPONSE:

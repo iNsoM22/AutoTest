@@ -31,14 +31,19 @@ _SIMPLE_CSS_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 _TAG_TO_ROLE: dict[str, str] = {
     "button": "button",
-    "a": "link",
     "select": "combobox",
     "textarea": "textbox",
 }
 
 
 def _css_attr_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\00000d")
+        .replace("\n", "\\00000a")
+        .replace("\f", "\\00000c")
+    )
 
 
 def _css_id_selector(element_id: str) -> str:
@@ -81,6 +86,8 @@ def _infer_role(target: dict[str, Any]) -> str:
         if input_type in ("", "text", "email", "tel", "url"):
             return "textbox"
         return ""
+    if tag == "a":
+        return "link" if bool(str(target.get("href", "")).strip()) else ""
     return _TAG_TO_ROLE.get(tag, "")
 
 

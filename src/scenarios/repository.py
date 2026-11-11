@@ -17,6 +17,11 @@ class ScenarioRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    @property
+    def database(self) -> Database:
+        """Return the underlying Database instance for multi-repository transactions."""
+        return self._db
+
     def replace_for_session(
         self,
         session_id: str,

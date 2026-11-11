@@ -88,6 +88,10 @@ class ProjectService:
         return saved
 
     def delete_project(self, project_id: str) -> None:
+        if self._repo.has_active_sessions(project_id):
+            raise SessionStateError(
+                f"Cannot delete project {project_id} while a recording session is active."
+            )
         deleted = self._repo.delete(project_id)
         if not deleted:
             raise ProjectNotFoundError(f"Project not found: {project_id}")
@@ -187,6 +191,7 @@ class SessionService:
             }
         )
         saved = self._sessions.update(updated)
+        self._sessions.close_open_pages(session_id, now)
         logger.info("Stopped recording session %s", saved.id)
         return saved
 
@@ -209,6 +214,7 @@ class SessionService:
             }
         )
         saved = self._sessions.update(updated)
+        self._sessions.close_open_pages(session_id, now)
         logger.warning("Marked recording session %s as failed: %s", saved.id, error_message)
         return saved
 
@@ -223,6 +229,10 @@ class SessionService:
         session = self._sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(f"Recording session not found: {session_id}")
+        if session.status == SessionStatus.ACTIVE:
+            raise SessionStateError(
+                f"Cannot delete active recording session {session_id}; stop it first."
+            )
         self._sessions.delete(session_id)
         shutil.rmtree(
             self._artifacts.session_dir(session.project_id, session_id),

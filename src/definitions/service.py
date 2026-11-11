@@ -8,6 +8,7 @@ from src.definitions.builder import TestDefinitionBuilder
 from src.definitions.models import (
     AssertionType,
     SelectorCandidate,
+    SelectorStrategy,
     TestAssertion,
     TestDefinition,
     TestDefinitionError,
@@ -15,6 +16,7 @@ from src.definitions.models import (
     slugify_test_function_name,
 )
 from src.definitions.repository import TestDefinitionRepository
+from src.processing.models import ProcessedActionType
 from src.processing.repository import ProcessedEventRepository
 from src.projects.repository import ProjectRepository, SessionRepository
 from src.scenarios.repository import ScenarioRepository
@@ -150,6 +152,13 @@ class TestDefinitionService:
                     patch["summary"] = summary.strip()
                 if selector is not None:
                     patch["selector"] = selector
+                    if action.action_type == ProcessedActionType.SUBMIT and action.via_form_submit:
+                        is_form_css = (
+                            selector.strategy == SelectorStrategy.CSS
+                            and selector.value.lstrip().lower().startswith("form")
+                        )
+                        if not is_form_css:
+                            patch["via_form_submit"] = False
                 if value is not None:
                     patch["value"] = value
                     patch["is_redacted"] = False

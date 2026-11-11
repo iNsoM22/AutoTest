@@ -82,17 +82,17 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Execute a block inside an explicit SQLite transaction."""
+        """Execute a block inside an explicit IMMEDIATE SQLite transaction."""
         conn = self.connect()
         if conn.in_transaction:
             yield conn
             return
 
-        conn.execute("BEGIN;")
+        conn.execute("BEGIN IMMEDIATE;")
         try:
             yield conn
             conn.execute("COMMIT;")
-        except Exception:
+        except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK;")
             raise
@@ -128,7 +128,12 @@ class Database:
             instance.close()
 
     def close_all(self) -> None:
-        """Close the current thread's connection and attempt cleanup of any remaining ones."""
+        """Close the current thread's connection and attempt cleanup of any remaining ones.
+
+        Note: SQLite connections are thread-affine (`check_same_thread=True`), so connections
+        opened on other threads cannot be closed from here and must be closed on their owning
+        thread via `close_current_thread_connections()`.
+        """
         self.close()
         with self._lock:
             remaining = list(self._connections.values())
