@@ -6,15 +6,29 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from src.browser import BrowserCallbacks, BrowserLaunchConfig, BrowserManager, PageInfo
+from src.browser import (
+    BrowserCallbacks,
+    BrowserLaunchConfig,
+    BrowserManager,
+    PageInfo,
+)
+from src.browser.reproducer import ProcessedRecordingReproducer, ReproductionStepResult
 from src.execution import ExecutionMode, ExecutionProgressEvent, ExecutionService
+from src.processing import ProcessedEvent
 from src.projects import SessionService
 from src.recording import RawEvent, RecordingEngine
 from src.scenarios import ScenarioService
-from src.storage import Database, RawEventRepository
+from src.storage import (
+    ArtifactManager,
+    ArtifactRecord,
+    ArtifactRepository,
+    Database,
+    RawEventRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +59,8 @@ class BrowserSessionWorker(QThread):
         event_repository: RawEventRepository,
         *,
         batch_size: int = 50,
+        artifacts: ArtifactManager | None = None,
+        artifact_repository: ArtifactRepository | None = None,
         manager_factory: BrowserManagerFactory | None = None,
         poll_interval_ms: int = 100,
         ui_flush_interval_s: float = 0.25,
@@ -57,6 +73,8 @@ class BrowserSessionWorker(QThread):
         self._session_service = session_service
         self._event_repository = event_repository
         self._batch_size = batch_size
+        self._artifacts = artifacts
+        self._artifact_repository = artifact_repository
         self._manager_factory = manager_factory or _default_browser_manager_factory
         self._poll_interval_ms = poll_interval_ms
         self._ui_flush_interval_s = ui_flush_interval_s
@@ -148,6 +166,7 @@ class BrowserSessionWorker(QThread):
                 manager.close()
             except Exception:
                 logger.debug("Ignored error during browser worker cleanup", exc_info=True)
+            self._register_recorded_videos()
             try:
                 engine.flush()
                 self._emit_pending_ui_events(engine.event_count)
@@ -157,6 +176,32 @@ class BrowserSessionWorker(QThread):
                 Database.close_current_thread_connections()
 
         self.session_finished.emit(self._session_id)
+
+    def _register_recorded_videos(self) -> None:
+        video_dir_str = self._launch_config.record_video_dir.strip()
+        if not video_dir_str or self._artifacts is None or self._artifact_repository is None:
+            return
+        video_dir = Path(video_dir_str)
+        if not video_dir.is_dir():
+            return
+        for video_file in sorted(video_dir.glob("*.webm")):
+            try:
+                if not video_file.is_file() or video_file.stat().st_size == 0:
+                    continue
+                rel_path = self._artifacts.to_relative_path(video_file)
+                self._artifact_repository.create(
+                    ArtifactRecord(
+                        project_id=self._project_id,
+                        session_id=self._session_id,
+                        artifact_type="recording_video",
+                        relative_path=rel_path,
+                        mime_type="video/webm",
+                        size_bytes=video_file.stat().st_size,
+                        metadata={"filename": video_file.name},
+                    )
+                )
+            except Exception:
+                logger.debug("Failed to register recording video %s", video_file, exc_info=True)
 
     def _queue_ui_event(self, event: RawEvent) -> None:
         with self._ui_lock:
@@ -311,3 +356,63 @@ class SessionProcessingWorker(QThread):
             Database.close_current_thread_connections()
 
         self.processing_finished.emit(self._session_id, result, scenarios)
+
+
+class RecordingReproductionWorker(QThread):
+    """Replays a processed recording in a live Chromium browser off the Qt UI thread."""
+
+    step_completed = Signal(object)
+    reproduction_finished = Signal(object)
+    reproduction_failed = Signal(str)
+
+    def __init__(
+        self,
+        session_id: str,
+        events: list[ProcessedEvent],
+        *,
+        start_url: str = "",
+        viewport_width: int = 1280,
+        viewport_height: int = 800,
+        headless: bool = False,
+        slow_mo_ms: int = 250,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._session_id = session_id
+        self._events = list(events)
+        self._start_url = start_url
+        self._viewport_width = viewport_width
+        self._viewport_height = viewport_height
+        self._headless = headless
+        self._slow_mo_ms = slow_mo_ms
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        """Stop replaying further steps and close Chromium."""
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        """Execute processed steps via `ProcessedRecordingReproducer`."""
+
+        def _on_step(step_res: ReproductionStepResult) -> None:
+            self.step_completed.emit(step_res)
+
+        try:
+            reproducer = ProcessedRecordingReproducer()
+            summary = reproducer.reproduce(
+                self._session_id,
+                self._events,
+                start_url=self._start_url,
+                viewport_width=self._viewport_width,
+                viewport_height=self._viewport_height,
+                headless=self._headless,
+                slow_mo_ms=self._slow_mo_ms,
+                cancel_event=self._cancel_event,
+                on_step=_on_step,
+            )
+        except Exception as exc:
+            logger.exception("Recording reproduction worker failed")
+            self.reproduction_failed.emit(str(exc))
+            return
+
+        self.reproduction_finished.emit(summary)

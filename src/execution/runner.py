@@ -90,7 +90,22 @@ def _autotest_page_observer(request: pytest.FixtureRequest):
                 page = None
 
     listeners: list[tuple[str, Any]] = []
+    trace_dir = os.environ.get("AUTOTEST_TRACE_DIR", "")
+    trace_mode = ""
     if page is not None:
+        if trace_dir:
+            try:
+                ctx = page.context
+                if getattr(ctx, "_autotest_tracing_started", False):
+                    ctx.tracing.start_chunk()
+                    trace_mode = "chunk"
+                else:
+                    ctx.tracing.start(screenshots=True, snapshots=True, sources=False)
+                    ctx._autotest_tracing_started = True
+                    trace_mode = "root"
+            except Exception:
+                trace_mode = ""
+
         def _on_console(msg: Any) -> None:
             try:
                 if getattr(msg, "type", "") == "error":
@@ -137,22 +152,46 @@ def _autotest_page_observer(request: pytest.FixtureRequest):
                 pass
 
     screenshot_path = ""
+    trace_path = ""
     failed = bool(getattr(request.node, "_autotest_failed", False))
+    module_stem = Path(request.node.nodeid.split("::", 1)[0]).stem
+    func_name = _base_func_name(request.node.nodeid)
     screenshot_dir = os.environ.get("AUTOTEST_SCREENSHOT_DIR", "")
     if failed and page is not None and screenshot_dir:
         try:
             out_dir = Path(screenshot_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            module_stem = Path(request.node.nodeid.split("::", 1)[0]).stem
-            func_name = _base_func_name(request.node.nodeid)
             target = out_dir / f"{module_stem}__{func_name}.png"
             page.screenshot(path=str(target), full_page=True, timeout=5000)
             screenshot_path = str(target)
         except Exception:
             screenshot_path = ""
 
+    if page is not None and trace_mode:
+        try:
+            ctx = page.context
+            if failed and trace_dir:
+                out_dir = Path(trace_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                trace_target = out_dir / f"{module_stem}__{func_name}.zip"
+                if trace_mode == "chunk":
+                    ctx.tracing.stop_chunk(path=str(trace_target))
+                else:
+                    ctx.tracing.stop(path=str(trace_target))
+                    ctx._autotest_tracing_started = False
+                trace_path = str(trace_target)
+            else:
+                if trace_mode == "chunk":
+                    ctx.tracing.stop_chunk()
+                else:
+                    ctx.tracing.stop()
+                    ctx._autotest_tracing_started = False
+        except Exception:
+            trace_path = ""
+
     _META_BY_NODEID[request.node.nodeid] = {
         "screenshot_path": screenshot_path,
+        "trace_path": trace_path,
         "console_errors": console_errors,
         "network_errors": network_errors,
     }
@@ -239,6 +278,7 @@ def pytest_runtest_logfinish(nodeid: str, location: Any) -> None:
             "stdout": "".join(stdout_parts),
             "stderr": "".join(stderr_parts),
             "screenshot_path": meta.get("screenshot_path", ""),
+            "trace_path": meta.get("trace_path", ""),
             "console_errors": meta.get("console_errors", []),
             "network_errors": meta.get("network_errors", []),
         }
@@ -301,6 +341,7 @@ class ExecutionRunner:
         run_dir = self._artifacts.ensure_run_dir(run.project_id, run.session_id, run.id)
         suite_dir = run_dir / "suite"
         screenshots_dir = run_dir / "screenshots"
+        traces_dir = run_dir / "traces"
         shared_context = run.mode == ExecutionMode.JOURNEY and len(definitions) > 1
         self._copy_service.export_suite_to_dir(
             definitions,
@@ -346,6 +387,7 @@ class ExecutionRunner:
             f"{run_dir}{os.pathsep}{existing_pypath}" if existing_pypath else str(run_dir)
         )
         env["AUTOTEST_SCREENSHOT_DIR"] = str(screenshots_dir)
+        env["AUTOTEST_TRACE_DIR"] = str(traces_dir)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
@@ -642,6 +684,27 @@ class ExecutionRunner:
                         result.screenshot_artifact_id = artifact.id
                     except Exception:
                         logger.debug("Failed to register failure screenshot", exc_info=True)
+
+            trace_path_str = str(data.get("trace_path", "") or "")
+            if trace_path_str:
+                trace_path = Path(trace_path_str)
+                if trace_path.is_file():
+                    try:
+                        rel_path = self._artifacts.to_relative_path(trace_path)
+                        trace_artifact = self._artifact_repo.create(
+                            ArtifactRecord(
+                                project_id=run.project_id,
+                                session_id=run.session_id,
+                                artifact_type="failure_trace",
+                                relative_path=rel_path,
+                                mime_type="application/zip",
+                                size_bytes=trace_path.stat().st_size,
+                                metadata={"run_id": run.id, "function_name": func_name},
+                            )
+                        )
+                        result.trace_artifact_id = trace_artifact.id
+                    except Exception:
+                        logger.debug("Failed to register failure trace", exc_info=True)
 
             if on_result_updated is not None:
                 on_result_updated(result)

@@ -63,6 +63,7 @@ class TestCaseResult(BaseModel):
     stdout: str = ""
     stderr: str = ""
     screenshot_artifact_id: str | None = None
+    trace_artifact_id: str | None = None
     console_errors: list[str] = Field(default_factory=list)
     network_errors: list[str] = Field(default_factory=list)
 

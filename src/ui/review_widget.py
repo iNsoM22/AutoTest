@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -24,9 +27,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.browser.reproducer import ReproductionStepResult, ReproductionSummary
+from src.export import RecordingBundleError, RecordingBundleService, export_recording_pdf
 from src.processing import CorrelatedOutcome, ProcessedEvent, ProcessingResult
+from src.projects import SessionService
 from src.scenarios import Scenario, ScenarioError, ScenarioService
-from src.ui.workers import SessionProcessingWorker
+from src.storage import ArtifactManager, ArtifactRecord, ArtifactRepository
+from src.ui.workers import RecordingReproductionWorker, SessionProcessingWorker
 
 
 class ReviewWidget(QWidget):
@@ -40,16 +47,27 @@ class ReviewWidget(QWidget):
         self,
         scenario_service: ScenarioService,
         parent: QWidget | None = None,
+        *,
+        artifacts: ArtifactManager | None = None,
+        artifact_repository: ArtifactRepository | None = None,
+        recording_bundle_service: RecordingBundleService | None = None,
+        session_service: SessionService | None = None,
     ) -> None:
         super().__init__(parent)
         self._scenario_service = scenario_service
+        self._artifacts = artifacts
+        self._artifact_repo = artifact_repository
+        self._bundle_service = recording_bundle_service
+        self._session_service = session_service
         self._session_id: str | None = None
         self._session_name: str = ""
         self._scenarios: list[Scenario] = []
         self._timeline: list[ProcessedEvent] = []
         self._visible_events: list[ProcessedEvent] = []
         self._uncorrelated_outcomes: list[CorrelatedOutcome] = []
+        self._video_artifacts: list[ArtifactRecord] = []
         self._worker: SessionProcessingWorker | None = None
+        self._repro_worker: RecordingReproductionWorker | None = None
         self._external_busy: bool = False
 
         self._build_ui()
@@ -57,8 +75,8 @@ class ReviewWidget(QWidget):
 
     @property
     def is_processing(self) -> bool:
-        """Return True while background session processing is running."""
-        return self._worker is not None
+        """Return True while background session processing or reproduction is running."""
+        return self._worker is not None or self._repro_worker is not None
 
     def set_external_busy(self, busy: bool) -> None:
         """Lock/unlock review controls while another tab holds an active worker."""
@@ -67,7 +85,7 @@ class ReviewWidget(QWidget):
             self._update_controls()
 
     def shutdown(self) -> None:
-        """Disconnect and wait for any active background processing worker before teardown."""
+        """Disconnect and wait for any active background worker before teardown."""
         worker = self._worker
         if worker is not None:
             for sig in (worker.processing_finished, worker.processing_failed):
@@ -79,6 +97,23 @@ class ReviewWidget(QWidget):
             else:
                 worker.setParent(None)
             self._worker = None
+
+        repro = self._repro_worker
+        if repro is not None:
+            for sig in (
+                repro.step_completed,
+                repro.reproduction_finished,
+                repro.reproduction_failed,
+            ):
+                with suppress(RuntimeError, TypeError):
+                    sig.disconnect()
+            repro.request_cancel()
+            repro.wait(5000)
+            if not repro.isRunning():
+                repro.deleteLater()
+            else:
+                repro.setParent(None)
+            self._repro_worker = None
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -94,11 +129,31 @@ class ReviewWidget(QWidget):
         self.show_all_steps_btn.setCheckable(True)
         self.show_all_steps_btn.toggled.connect(self._refresh_timeline_table)
 
+        self.watch_video_btn = QPushButton("Watch Video", self)
+        self.watch_video_btn.clicked.connect(self._on_watch_video)
+
+        self.delete_video_btn = QPushButton("Delete Video", self)
+        self.delete_video_btn.clicked.connect(self._on_delete_video)
+
+        self.reproduce_btn = QPushButton("Reproduce", self)
+        self.reproduce_btn.clicked.connect(self._on_toggle_reproduce)
+
+        self.export_json_btn = QPushButton("Export JSON", self)
+        self.export_json_btn.clicked.connect(self._on_export_json)
+
+        self.export_pdf_btn = QPushButton("Export PDF", self)
+        self.export_pdf_btn.clicked.connect(self._on_export_pdf)
+
         self.process_btn = QPushButton("Process Session", self)
         self.process_btn.setObjectName("primaryButton")
         self.process_btn.clicked.connect(self.process_current_session)
 
         toolbar.addWidget(self.summary_label, stretch=1)
+        toolbar.addWidget(self.watch_video_btn)
+        toolbar.addWidget(self.delete_video_btn)
+        toolbar.addWidget(self.reproduce_btn)
+        toolbar.addWidget(self.export_json_btn)
+        toolbar.addWidget(self.export_pdf_btn)
         toolbar.addWidget(self.show_all_steps_btn)
         toolbar.addWidget(self.process_btn)
 
@@ -223,6 +278,7 @@ class ReviewWidget(QWidget):
         self._session_id = session_id
         self._session_name = session_name
         self._uncorrelated_outcomes = []
+        self._video_artifacts = []
         if session_id is None:
             self._scenarios = []
             self._timeline = []
@@ -234,6 +290,7 @@ class ReviewWidget(QWidget):
             self._update_controls()
             return
 
+        self._refresh_video_artifacts()
         self._reload_from_storage()
 
     def process_current_session(self) -> None:
@@ -539,15 +596,204 @@ class ReviewWidget(QWidget):
             return
         self._reload_from_storage(select_scenario_id=scenario.id, emit_changed=True)
 
+    def _refresh_video_artifacts(self) -> None:
+        self._video_artifacts = []
+        if self._session_id is None or self._artifact_repo is None or self._artifacts is None:
+            return
+        records = self._artifact_repo.list_by_session(
+            self._session_id,
+            artifact_type="recording_video",
+        )
+        valid: list[ArtifactRecord] = []
+        for rec in records:
+            try:
+                if self._artifacts.resolve_path(rec.relative_path).is_file():
+                    valid.append(rec)
+            except ValueError:
+                continue
+        self._video_artifacts = valid
+
+    def _on_watch_video(self) -> None:
+        self._refresh_video_artifacts()
+        if not self._video_artifacts or self._artifacts is None:
+            QMessageBox.information(
+                self,
+                "No Recording Video",
+                "No recording video is available for this session.",
+            )
+            self._update_controls()
+            return
+        # Open the primary (largest) recorded video with the system media player.
+        primary = max(self._video_artifacts, key=lambda rec: rec.size_bytes)
+        video_path = self._artifacts.resolve_path(primary.relative_path)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(video_path)))
+
+    def _on_delete_video(self) -> None:
+        if not self._video_artifacts or self._artifacts is None or self._artifact_repo is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete Recording Video",
+            f"Delete {len(self._video_artifacts)} recorded video file(s) for this session?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for rec in self._video_artifacts:
+            with suppress(OSError, ValueError):
+                self._artifacts.delete_file(rec.relative_path)
+            self._artifact_repo.delete(rec.id)
+        self._refresh_video_artifacts()
+        self._update_controls()
+
+    def _on_export_json(self) -> None:
+        if self._session_id is None or self._bundle_service is None:
+            return
+        default_name = f"{(self._session_name or 'recording').replace(' ', '_')}.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Processed Recording (JSON)",
+            default_name,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            bundle = self._bundle_service.export_to_file(self._session_id, Path(file_path))
+        except (RecordingBundleError, OSError) as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Recording Exported",
+            f"Exported {len(bundle.processed_events)} step(s) and "
+            f"{len(bundle.scenarios)} scenario(s) to:\n{file_path}",
+        )
+
+    def _on_export_pdf(self) -> None:
+        if self._session_id is None or self._bundle_service is None:
+            return
+        default_name = f"{(self._session_name or 'recording_report').replace(' ', '_')}.pdf"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Recording Report (PDF)",
+            default_name,
+            "PDF Files (*.pdf);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            bundle = self._bundle_service.export_session(self._session_id)
+            export_recording_pdf(bundle, Path(file_path))
+        except (RecordingBundleError, OSError) as exc:
+            QMessageBox.warning(self, "PDF Export Failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "PDF Report Exported",
+            f"Saved professional report ({len(bundle.processed_events)} step(s)) to:\n{file_path}",
+        )
+
+    def _on_toggle_reproduce(self) -> None:
+        if self._repro_worker is not None:
+            self._repro_worker.request_cancel()
+            self.reproduce_btn.setEnabled(False)
+            self.summary_label.setText("Stopping live reproduction...")
+            return
+
+        if self._session_id is None or not self._timeline or self._worker is not None:
+            return
+        start_url = ""
+        viewport_w, viewport_h = 1280, 800
+        if self._session_service is not None:
+            session = self._session_service.get_session(self._session_id)
+            if session is not None:
+                start_url = session.start_url
+                viewport_w = int(session.metadata.get("viewport_width", 1280) or 1280)
+                viewport_h = int(session.metadata.get("viewport_height", 800) or 800)
+
+        worker = RecordingReproductionWorker(
+            self._session_id,
+            list(self._timeline),
+            start_url=start_url,
+            viewport_width=max(320, viewport_w),
+            viewport_height=max(240, viewport_h),
+            headless=False,
+            parent=self,
+        )
+        worker.step_completed.connect(self._on_repro_step_completed)
+        worker.reproduction_finished.connect(self._on_repro_finished)
+        worker.reproduction_failed.connect(self._on_repro_failed)
+        self._repro_worker = worker
+        self.summary_label.setText(f"Reproducing {len(self._timeline)} step(s) in live Chromium...")
+        self._update_controls()
+        self.processing_started.emit()
+        worker.start()
+
+    def _on_repro_step_completed(self, step_obj: object) -> None:
+        if not isinstance(step_obj, ReproductionStepResult):
+            return
+        self.summary_label.setText(
+            f"Reproducing step {step_obj.order_index}/{len(self._timeline)} "
+            f"[{step_obj.status.upper()}]: {step_obj.description}"
+        )
+
+    def _on_repro_finished(self, summary_obj: object) -> None:
+        worker = self._repro_worker
+        self._repro_worker = None
+        if worker is not None:
+            worker.wait(5000)
+            worker.deleteLater()
+        self._update_controls()
+        self.processing_finished.emit()
+        if isinstance(summary_obj, ReproductionSummary):
+            status_word = "Cancelled" if summary_obj.cancelled else "Completed"
+            self.summary_label.setText(
+                f"Reproduction {status_word}: {summary_obj.passed_steps} passed, "
+                f"{summary_obj.failed_steps} failed, {summary_obj.skipped_steps} skipped "
+                f"(of {summary_obj.total_steps} step(s))."
+            )
+            if summary_obj.failed_steps > 0:
+                failed_lines = [
+                    f"Step {s.order_index} ({s.description}): {s.error_message}"
+                    for s in summary_obj.steps
+                    if s.status == "failed"
+                ]
+                QMessageBox.warning(
+                    self,
+                    "Reproduction Finished with Failures",
+                    f"{summary_obj.passed_steps} passed, {summary_obj.failed_steps} failed, "
+                    f"{summary_obj.skipped_steps} skipped.\n\n" + "\n".join(failed_lines[:5]),
+                )
+
+    def _on_repro_failed(self, error_message: str) -> None:
+        worker = self._repro_worker
+        self._repro_worker = None
+        if worker is not None:
+            worker.wait(5000)
+            worker.deleteLater()
+        self._update_controls()
+        self.processing_finished.emit()
+        QMessageBox.warning(self, "Reproduction Failed", error_message)
+
     def _update_controls(self) -> None:
         has_session = self._session_id is not None
-        busy = self._worker is not None or self._external_busy
+        reproducing = self._repro_worker is not None
+        busy = self._worker is not None or reproducing or self._external_busy
         selected = self._selected_scenarios()
         single = len(selected) == 1
         multi = len(selected) >= 2
+        has_timeline = bool(self._timeline)
+        has_video = bool(self._video_artifacts)
 
         self.process_btn.setEnabled(has_session and not busy)
-        self.show_all_steps_btn.setEnabled(has_session and not busy and bool(self._timeline))
+        self.show_all_steps_btn.setEnabled(has_session and not busy and has_timeline)
+        self.watch_video_btn.setEnabled(has_session and has_video and not reproducing)
+        self.delete_video_btn.setEnabled(has_session and has_video and not busy)
+        self.reproduce_btn.setText("Stop Replay" if reproducing else "Reproduce")
+        self.reproduce_btn.setEnabled(reproducing or (has_session and has_timeline and not busy))
+        can_export = has_session and has_timeline and not busy and self._bundle_service is not None
+        self.export_json_btn.setEnabled(can_export)
+        self.export_pdf_btn.setEnabled(can_export)
         self.rename_btn.setEnabled(single and not busy)
         self.toggle_include_btn.setEnabled(single and not busy)
         self.delete_btn.setEnabled(single and not busy)

@@ -18,7 +18,7 @@ from src.config import (
 )
 from src.definitions import TestDefinitionRepository, TestDefinitionService
 from src.execution import ExecutionRepository, ExecutionService
-from src.export import CopyExportService
+from src.export import CopyExportService, RecordingBundleService
 from src.processing import ProcessedEventRepository
 from src.projects import ProjectRepository, ProjectService, SessionRepository, SessionService
 from src.scenarios import ScenarioRepository, ScenarioService
@@ -40,6 +40,7 @@ class AppContext:
     scenario_service: ScenarioService
     definition_service: TestDefinitionService
     copy_service: CopyExportService
+    recording_bundle_service: RecordingBundleService
     execution_service: ExecutionService
     project_service: ProjectService
     session_service: SessionService
@@ -95,6 +96,12 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         definition_repo,
     )
     copy_service = CopyExportService()
+    recording_bundle_service = RecordingBundleService(
+        project_repo,
+        session_repo,
+        processed_event_repo,
+        scenario_repo,
+    )
     execution_repo = ExecutionRepository(database)
     execution_service = ExecutionService(
         project_repo,
@@ -118,6 +125,7 @@ def create_app_context(settings: AppSettings | None = None) -> AppContext:
         scenario_service=scenario_service,
         definition_service=definition_service,
         copy_service=copy_service,
+        recording_bundle_service=recording_bundle_service,
         execution_service=execution_service,
         project_service=project_service,
         session_service=session_service,
@@ -210,6 +218,9 @@ def main(argv: list[str] | None = None) -> int:
             definition_service=context.definition_service,
             copy_service=context.copy_service,
             execution_service=context.execution_service,
+            artifacts=context.artifacts,
+            artifact_repository=context.artifact_repository,
+            recording_bundle_service=context.recording_bundle_service,
         )
         window.show()
         return int(app.exec())

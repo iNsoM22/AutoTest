@@ -35,6 +35,7 @@ class BrowserLaunchConfig(BaseModel):
     viewport_width: int = Field(default=1280, ge=320)
     viewport_height: int = Field(default=800, ge=240)
     start_url: str = "about:blank"
+    record_video_dir: str = ""
 
     @classmethod
     def from_settings(
@@ -43,6 +44,7 @@ class BrowserLaunchConfig(BaseModel):
         *,
         start_url: str = "",
         headless: bool | None = None,
+        record_video_dir: str = "",
     ) -> BrowserLaunchConfig:
         """Build a launch config from `AppSettings` with optional overrides."""
         resolved_url = start_url.strip() or "about:blank"
@@ -51,6 +53,7 @@ class BrowserLaunchConfig(BaseModel):
             slow_mo_ms=settings.browser_slow_mo_ms,
             default_timeout_ms=settings.browser_default_timeout_ms,
             start_url=resolved_url,
+            record_video_dir=record_video_dir,
         )
 
 

@@ -88,12 +88,19 @@ class BrowserManager:
             )
             self._browser.on("disconnected", self._handle_browser_disconnected)
 
-            self._context = self._browser.new_context(
-                viewport={
+            context_kwargs: dict[str, object] = {
+                "viewport": {
                     "width": config.viewport_width,
                     "height": config.viewport_height,
                 }
-            )
+            }
+            if config.record_video_dir.strip():
+                context_kwargs["record_video_dir"] = config.record_video_dir
+                context_kwargs["record_video_size"] = {
+                    "width": config.viewport_width,
+                    "height": config.viewport_height,
+                }
+            self._context = self._browser.new_context(**context_kwargs)  # type: ignore[arg-type]
             self._context.set_default_timeout(config.default_timeout_ms)
             if self._callbacks.on_context_created is not None:
                 self._callbacks.on_context_created(self._context)

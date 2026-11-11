@@ -120,6 +120,14 @@ class ArtifactManager:
             raise ValueError(f"Path is outside artifacts base directory: {path}")
         return resolved.relative_to(self._base_dir).as_posix()
 
+    def delete_file(self, relative_path: str) -> bool:
+        """Delete a stored artifact file safely within `base_dir`."""
+        target = self.resolve_path(relative_path)
+        if target.is_file():
+            target.unlink()
+            return True
+        return False
+
     def _safe_join(self, *parts: str) -> Path:
         for part in parts:
             if not part or "/" in part or "\\" in part or part in {".", ".."}:
@@ -170,21 +178,46 @@ class ArtifactRepository:
         )
         return self._row_to_record(row) if row is not None else None
 
-    def list_by_session(self, session_id: str) -> list[ArtifactRecord]:
-        """Return all artifact records associated with a recording session."""
-        rows = (
-            self._db.connect()
-            .execute(
-                """
-                SELECT * FROM artifacts
-                WHERE session_id = ?
-                ORDER BY created_at ASC;
-                """,
-                (session_id,),
+    def list_by_session(
+        self,
+        session_id: str,
+        *,
+        artifact_type: str | None = None,
+    ) -> list[ArtifactRecord]:
+        """Return artifact records associated with a recording session."""
+        if artifact_type is not None:
+            rows = (
+                self._db.connect()
+                .execute(
+                    """
+                    SELECT * FROM artifacts
+                    WHERE session_id = ? AND artifact_type = ?
+                    ORDER BY created_at ASC;
+                    """,
+                    (session_id, artifact_type),
+                )
+                .fetchall()
             )
-            .fetchall()
-        )
+        else:
+            rows = (
+                self._db.connect()
+                .execute(
+                    """
+                    SELECT * FROM artifacts
+                    WHERE session_id = ?
+                    ORDER BY created_at ASC;
+                    """,
+                    (session_id,),
+                )
+                .fetchall()
+            )
         return [self._row_to_record(row) for row in rows]
+
+    def delete(self, artifact_id: str) -> bool:
+        """Delete a single artifact metadata row by ID."""
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM artifacts WHERE id = ?;", (artifact_id,))
+        return cursor.rowcount > 0
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:

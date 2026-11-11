@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from contextlib import suppress
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -33,7 +35,7 @@ from src.browser import BrowserLaunchConfig, PageInfo
 from src.config import AppSettings
 from src.definitions import TestDefinitionService
 from src.execution import ExecutionService
-from src.export import CopyExportService
+from src.export import CopyExportService, RecordingBundleError, RecordingBundleService
 from src.projects import (
     Project,
     ProjectCreate,
@@ -45,7 +47,7 @@ from src.projects import (
 )
 from src.recording import RawEvent
 from src.scenarios import ScenarioService
-from src.storage import RawEventRepository
+from src.storage import ArtifactManager, ArtifactRepository, RawEventRepository
 from src.ui.definitions_widget import DefinitionsWidget
 from src.ui.dialogs import ProjectDialog
 from src.ui.execution_widget import ExecutionWidget
@@ -72,6 +74,9 @@ class MainWindow(QMainWindow):
         definition_service: TestDefinitionService | None = None,
         copy_service: CopyExportService | None = None,
         execution_service: ExecutionService | None = None,
+        artifacts: ArtifactManager | None = None,
+        artifact_repository: ArtifactRepository | None = None,
+        recording_bundle_service: RecordingBundleService | None = None,
         browser_manager_factory: BrowserManagerFactory | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -84,6 +89,9 @@ class MainWindow(QMainWindow):
         self._definition_service = definition_service
         self._copy_service = copy_service
         self._execution_service = execution_service
+        self._artifacts = artifacts
+        self._artifact_repository = artifact_repository
+        self._recording_bundle_service = recording_bundle_service
         self._browser_manager_factory = browser_manager_factory
         self.review_widget: ReviewWidget | None = None
         self.definitions_widget: DefinitionsWidget | None = None
@@ -224,6 +232,9 @@ class MainWindow(QMainWindow):
         self.sessions_table.itemSelectionChanged.connect(self._on_session_selection_changed)
 
         sessions_actions = QHBoxLayout()
+        self.import_recording_btn = QPushButton("Import Recording (JSON)", sessions_tab)
+        self.import_recording_btn.clicked.connect(self._on_import_recording)
+        sessions_actions.addWidget(self.import_recording_btn)
         sessions_actions.addStretch(1)
         self.review_session_btn = QPushButton("Process & Review", sessions_tab)
         self.review_session_btn.setObjectName("primaryButton")
@@ -279,7 +290,14 @@ class MainWindow(QMainWindow):
 
         # Tab 4: Timeline & Scenarios review
         if self._scenario_service is not None:
-            self.review_widget = ReviewWidget(self._scenario_service, panel)
+            self.review_widget = ReviewWidget(
+                self._scenario_service,
+                panel,
+                artifacts=self._artifacts,
+                artifact_repository=self._artifact_repository,
+                recording_bundle_service=self._recording_bundle_service,
+                session_service=self._session_service,
+            )
             self.review_widget.scenarios_changed.connect(self._on_scenarios_changed)
             self.review_widget.processing_started.connect(self._on_execution_state_changed)
             self.review_widget.processing_finished.connect(self._on_execution_state_changed)
@@ -406,6 +424,9 @@ class MainWindow(QMainWindow):
         self.review_session_btn.setEnabled(
             has_sessions and not is_busy and self.review_widget is not None
         )
+        self.import_recording_btn.setEnabled(
+            has_project and not is_busy and self._recording_bundle_service is not None
+        )
 
     def _sync_tab_locks(self) -> None:
         recording = self._active_worker is not None
@@ -441,6 +462,7 @@ class MainWindow(QMainWindow):
             self.sessions_table.setRowCount(0)
             self.delete_session_btn.setEnabled(False)
             self.review_session_btn.setEnabled(False)
+            self.import_recording_btn.setEnabled(False)
             self._clear_session_tabs()
             return
 
@@ -459,6 +481,9 @@ class MainWindow(QMainWindow):
         self.start_url_input.setEnabled(not is_busy)
         self.record_toggle_btn.setEnabled(
             has_active_session or not (self._is_execution_running() or self._is_processing())
+        )
+        self.import_recording_btn.setEnabled(
+            not is_busy and self._recording_bundle_service is not None
         )
         self._refresh_sessions(project.id)
         if project_changed and not is_busy and self.sessions_table.rowCount() > 0:
@@ -612,6 +637,40 @@ class MainWindow(QMainWindow):
         if self.sessions_table.rowCount() > 0:
             self.sessions_table.selectRow(0)
 
+    def _on_import_recording(self) -> None:
+        if (
+            self._selected_project_id is None
+            or self._recording_bundle_service is None
+            or self._is_busy()
+        ):
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Processed Recording (JSON)",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            imported = self._recording_bundle_service.import_from_file(
+                self._selected_project_id,
+                Path(file_path),
+            )
+        except (RecordingBundleError, OSError) as exc:
+            QMessageBox.warning(self, "Import Failed", str(exc))
+            return
+
+        self._refresh_sessions(self._selected_project_id)
+        for row_idx in range(self.sessions_table.rowCount()):
+            item = self.sessions_table.item(row_idx, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == imported.id:
+                self.sessions_table.selectRow(row_idx)
+                break
+        if self.review_widget is not None:
+            self.tabs.setCurrentWidget(self.review_widget)
+        self.statusBar().showMessage(f"Imported processed recording '{imported.name}'.", 5000)
+
     def _on_toggle_recording(self) -> None:
         if self._active_worker is not None:
             self.stop_active_session()
@@ -639,7 +698,19 @@ class MainWindow(QMainWindow):
         self._refresh_pages_table()
         self._clear_events_table()
 
-        config = BrowserLaunchConfig.from_settings(self._settings, start_url=session.start_url)
+        video_dir_str = ""
+        if self._artifacts is not None:
+            video_dir = (
+                self._artifacts.ensure_session_dir(self._selected_project_id, session.id) / "video"
+            )
+            video_dir.mkdir(parents=True, exist_ok=True)
+            video_dir_str = str(video_dir)
+
+        config = BrowserLaunchConfig.from_settings(
+            self._settings,
+            start_url=session.start_url,
+            record_video_dir=video_dir_str,
+        )
         worker = BrowserSessionWorker(
             self._selected_project_id,
             session.id,
@@ -647,6 +718,8 @@ class MainWindow(QMainWindow):
             self._session_service,
             self._event_repository,
             batch_size=self._settings.event_batch_size,
+            artifacts=self._artifacts,
+            artifact_repository=self._artifact_repository,
             manager_factory=self._browser_manager_factory,
             parent=self,
         )

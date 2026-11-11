@@ -207,6 +207,7 @@ class ExecutionRepository:
                 r.stdout,
                 r.stderr,
                 r.screenshot_artifact_id,
+                r.trace_artifact_id,
                 json.dumps(r.console_errors, ensure_ascii=False),
                 json.dumps(r.network_errors, ensure_ascii=False),
             )
@@ -218,10 +219,10 @@ class ExecutionRepository:
                 INSERT INTO test_results (
                     id, run_id, definition_id, function_name, test_name,
                     status, order_index, duration_ms, error_message, traceback,
-                    stdout, stderr, screenshot_artifact_id,
+                    stdout, stderr, screenshot_artifact_id, trace_artifact_id,
                     console_errors_json, network_errors_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 rows,
             )
@@ -240,6 +241,7 @@ class ExecutionRepository:
                     stdout = ?,
                     stderr = ?,
                     screenshot_artifact_id = ?,
+                    trace_artifact_id = ?,
                     console_errors_json = ?,
                     network_errors_json = ?
                 WHERE id = ?;
@@ -252,6 +254,7 @@ class ExecutionRepository:
                     result.stdout,
                     result.stderr,
                     result.screenshot_artifact_id,
+                    result.trace_artifact_id,
                     json.dumps(result.console_errors, ensure_ascii=False),
                     json.dumps(result.network_errors, ensure_ascii=False),
                     result.id,
@@ -310,6 +313,7 @@ class ExecutionRepository:
             stdout=row["stdout"],
             stderr=row["stderr"],
             screenshot_artifact_id=row["screenshot_artifact_id"],
+            trace_artifact_id=row["trace_artifact_id"],
             console_errors=json.loads(row["console_errors_json"] or "[]"),
             network_errors=json.loads(row["network_errors_json"] or "[]"),
         )

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from contextlib import suppress
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -66,6 +69,7 @@ class ExecutionWidget(QWidget):
         self._active_run_id: str | None = None
         self._extra_env: dict[str, str] = {}
         self._external_busy: bool = False
+        self._selected_trace_path: Path | None = None
 
         self._build_ui()
         self._update_controls()
@@ -225,6 +229,29 @@ class ExecutionWidget(QWidget):
         self.screenshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.screenshot_label.setObjectName("mutedLabel")
         self.detail_tabs.addTab(self.screenshot_label, "Failure Screenshot")
+
+        trace_panel = QWidget(self)
+        trace_layout = QVBoxLayout(trace_panel)
+        trace_layout.setContentsMargins(12, 12, 12, 12)
+        trace_layout.setSpacing(8)
+        self.trace_status_label = QLabel("No Playwright trace for this test.", trace_panel)
+        self.trace_status_label.setObjectName("mutedLabel")
+        self.trace_status_label.setWordWrap(True)
+        trace_btn_row = QHBoxLayout()
+        self.open_trace_btn = QPushButton("Open Playwright Trace", trace_panel)
+        self.open_trace_btn.setObjectName("primaryButton")
+        self.open_trace_btn.setEnabled(False)
+        self.open_trace_btn.clicked.connect(self._on_open_trace)
+        self.reveal_trace_btn = QPushButton("Open Trace Folder", trace_panel)
+        self.reveal_trace_btn.setEnabled(False)
+        self.reveal_trace_btn.clicked.connect(self._on_reveal_trace)
+        trace_btn_row.addWidget(self.open_trace_btn)
+        trace_btn_row.addWidget(self.reveal_trace_btn)
+        trace_btn_row.addStretch(1)
+        trace_layout.addWidget(self.trace_status_label)
+        trace_layout.addLayout(trace_btn_row)
+        trace_layout.addStretch(1)
+        self.detail_tabs.addTab(trace_panel, "Playwright Trace")
 
         self.live_log_view = QPlainTextEdit(self)
         self.live_log_view.setReadOnly(True)
@@ -663,11 +690,56 @@ class ExecutionWidget(QWidget):
             self.screenshot_label.setPixmap(QPixmap())
             self.screenshot_label.setText("No failure screenshot.")
 
+        trace_path = self._execution_service.get_artifact_path(result.trace_artifact_id)
+        self._selected_trace_path = trace_path
+        if trace_path is not None:
+            size_kb = max(1, trace_path.stat().st_size // 1024)
+            self.trace_status_label.setText(
+                f"Playwright trace captured ({size_kb} KB): {trace_path.name}\n"
+                "Click 'Open Playwright Trace' to inspect DOM snapshots, network, and timeline."
+            )
+            self.open_trace_btn.setEnabled(True)
+            self.reveal_trace_btn.setEnabled(True)
+        else:
+            self.trace_status_label.setText("No Playwright trace for this test.")
+            self.open_trace_btn.setEnabled(False)
+            self.reveal_trace_btn.setEnabled(False)
+
+    def _on_open_trace(self) -> None:
+        if self._selected_trace_path is None or not self._selected_trace_path.is_file():
+            QMessageBox.information(self, "Trace Unavailable", "Trace file could not be found.")
+            return
+        try:
+            cmd = [
+                sys.executable,
+                "-m",
+                "playwright",
+                "show-trace",
+                str(self._selected_trace_path),
+            ]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Could Not Launch Trace Viewer",
+                f"Failed to launch Playwright Trace Viewer: {exc}\n\n"
+                f"You can open {self._selected_trace_path} at https://trace.playwright.dev",
+            )
+
+    def _on_reveal_trace(self) -> None:
+        if self._selected_trace_path is None or not self._selected_trace_path.is_file():
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._selected_trace_path.parent)))
+
     def _clear_details(self) -> None:
         self.traceback_view.clear()
         self.errors_view.clear()
         self.screenshot_label.setPixmap(QPixmap())
         self.screenshot_label.setText("No failure screenshot.")
+        self._selected_trace_path = None
+        self.trace_status_label.setText("No Playwright trace for this test.")
+        self.open_trace_btn.setEnabled(False)
+        self.reveal_trace_btn.setEnabled(False)
 
     def _update_controls(self) -> None:
         running = self._worker is not None

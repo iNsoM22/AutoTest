@@ -235,6 +235,11 @@ CREATE INDEX IF NOT EXISTS idx_test_results_run_order
     ON test_results (run_id, order_index);
 """
 
+_MIGRATION_005_SQL = """
+ALTER TABLE test_results
+    ADD COLUMN trace_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -255,6 +260,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=4,
         name="test_execution_runs_and_results",
         sql=_MIGRATION_004_SQL,
+    ),
+    Migration(
+        version=5,
+        name="test_results_trace_artifact",
+        sql=_MIGRATION_005_SQL,
     ),
 )
 
