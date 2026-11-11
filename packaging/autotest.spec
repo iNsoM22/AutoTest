@@ -10,6 +10,7 @@ Playwright's Chromium browser is installed separately or bundled via
 PLAYWRIGHT_BROWSERS_PATH; see docs/PACKAGING.md for details.
 """
 
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
@@ -72,3 +73,10 @@ coll = COLLECT(
     upx_exclude=[],
     name="autotest",
 )
+
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="AutoTest.app",
+        bundle_identifier="com.autotest.desktop",
+    )

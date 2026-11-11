@@ -252,3 +252,10 @@ def test_project_switching_clears_tabs_and_session_reloads_pages(
     assert not window.definitions_widget.generate_btn.isEnabled()
     window.definitions_widget.set_external_busy(False)
     assert window.definitions_widget.generate_btn.isEnabled()
+
+    # Execution/processing state updates preserve session selection and custom Start URL
+    assert window.sessions_table.currentRow() == 0
+    window.start_url_input.setText("https://beta.example.com/custom-path")
+    window._on_execution_state_changed()
+    assert window.sessions_table.currentRow() == 0
+    assert window.start_url_input.text() == "https://beta.example.com/custom-path"

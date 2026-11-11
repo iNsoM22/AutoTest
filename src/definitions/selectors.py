@@ -97,7 +97,7 @@ def build_selector_candidates(
     """Rank recorded DOM target attributes into a primary selector and fallbacks.
 
     Preference order (highest stability first):
-    1. `test_id` (`data-testid` / `data-test` / `data-cy`)
+    1. `test_id` (`data-testid` / `data-test-id` / `data-cy`)
     2. Accessible `role` + accessible `name` (`aria_label` or short `text`)
     3. `aria_label` (`get_by_label`)
     4. `placeholder` (`get_by_placeholder`)

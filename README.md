@@ -57,7 +57,7 @@ uv run mypy
 
 ## Trying the Sample Demo App
 
-AutoTest ships with a self-contained demo web app in [`examples/sample_demo_app/`](examples/sample_demo_app/README.md) featuring a login form, task manager, search filter, and modal with semantic `data-testid` and ARIA attributes. Open `examples/sample_demo_app/index.html` via its `file://` URL (or `python -m http.server`) as your AutoTest project's Start URL to try the full Record -> Review -> Generate -> Execute workflow immediately.
+AutoTest ships with a self-contained demo web app in [`examples/sample_demo_app/`](examples/sample_demo_app/README.md) featuring a login form, task manager, and search filter with semantic `data-testid` and ARIA attributes. Open `examples/sample_demo_app/index.html` via its `file://` URL (or `python -m http.server`) as your AutoTest project's Start URL to try the full Record -> Review -> Generate -> Execute workflow immediately.
 
 ## Cross-Platform Packaging
 

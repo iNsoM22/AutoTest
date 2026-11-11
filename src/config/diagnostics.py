@@ -73,6 +73,11 @@ def _check_playwright_chromium() -> DiagnosticCheck:
             ok=False,
             detail="playwright package not installed",
         )
+    install_hint = (
+        "Install Chromium with Playwright or set PLAYWRIGHT_BROWSERS_PATH (see docs/PACKAGING.md)"
+        if getattr(sys, "frozen", False)
+        else "Run: uv run playwright install chromium"
+    )
     try:
         from playwright.sync_api import sync_playwright
 
@@ -83,15 +88,13 @@ def _check_playwright_chromium() -> DiagnosticCheck:
         return DiagnosticCheck(
             name="Playwright Chromium",
             ok=False,
-            detail=(
-                f"Chromium binary missing at {exe_path}. Run: uv run playwright install chromium"
-            ),
+            detail=f"Chromium binary missing at {exe_path}. {install_hint}",
         )
     except Exception as exc:
         return DiagnosticCheck(
             name="Playwright Chromium",
             ok=False,
-            detail=f"Unable to locate Chromium ({exc}). Run: uv run playwright install chromium",
+            detail=f"Unable to locate Chromium ({exc}). {install_hint}",
         )
 
 

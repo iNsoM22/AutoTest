@@ -384,7 +384,28 @@ class MainWindow(QMainWindow):
             self.execution_widget.refresh()
 
     def _on_execution_state_changed(self) -> None:
-        self._update_project_view()
+        self._sync_busy_controls()
+
+    def _sync_busy_controls(self) -> None:
+        has_active_session = self._active_worker is not None
+        is_busy = self._is_busy()
+        self._sync_tab_locks()
+        has_project = self._projects.get(self._selected_project_id or "") is not None
+        has_sessions = self.sessions_table.rowCount() > 0
+
+        self.edit_project_btn.setEnabled(has_project and not is_busy)
+        self.delete_project_btn.setEnabled(has_project and not is_busy)
+        self.new_project_btn.setEnabled(not is_busy)
+        self.project_list.setEnabled(not is_busy)
+        self.start_url_input.setEnabled(has_project and not is_busy)
+        self.record_toggle_btn.setEnabled(
+            has_project
+            and (has_active_session or not (self._is_execution_running() or self._is_processing()))
+        )
+        self.delete_session_btn.setEnabled(has_sessions and not is_busy)
+        self.review_session_btn.setEnabled(
+            has_sessions and not is_busy and self.review_widget is not None
+        )
 
     def _sync_tab_locks(self) -> None:
         recording = self._active_worker is not None
