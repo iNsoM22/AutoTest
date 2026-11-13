@@ -202,11 +202,12 @@ def main(argv: list[str] | None = None) -> int:
 
         from PySide6.QtWidgets import QApplication
 
-        from src.ui import APP_STYLESHEET, MainWindow
+        from src.ui import APP_STYLESHEET, MainWindow, make_icon
 
         app = QApplication(sys.argv if argv is None else ["autotest", *argv])
         app.setApplicationName("AutoTest")
         app.setApplicationVersion(__version__)
+        app.setWindowIcon(make_icon("brand", size=24))
         app.setStyleSheet(APP_STYLESHEET)
 
         window = MainWindow(

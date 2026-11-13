@@ -7,10 +7,11 @@ from contextlib import suppress
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -33,6 +35,12 @@ from src.processing import CorrelatedOutcome, ProcessedEvent, ProcessingResult
 from src.projects import SessionService
 from src.scenarios import Scenario, ScenarioError, ScenarioService
 from src.storage import ArtifactManager, ArtifactRecord, ArtifactRepository
+from src.ui.theme import (
+    TOKENS,
+    make_icon,
+    make_vseparator,
+    set_button_state,
+)
 from src.ui.workers import RecordingReproductionWorker, SessionProcessingWorker
 
 
@@ -117,45 +125,71 @@ class ReviewWidget(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        # Top toolbar
-        toolbar = QHBoxLayout()
-        self.summary_label = QLabel("Select a recording session to process and review.", self)
+        # Tier 1: Primary header strip (Summary + Reproduce + Process)
+        primary_strip = QFrame(self)
+        primary_strip.setObjectName("toolbarStrip")
+        primary_row = QHBoxLayout(primary_strip)
+        primary_row.setContentsMargins(12, 8, 12, 8)
+        primary_row.setSpacing(8)
+
+        self.summary_label = QLabel(
+            "Select a recording session to process and review.", primary_strip
+        )
         self.summary_label.setObjectName("mutedLabel")
+
+        self.reproduce_btn = QPushButton("Reproduce", primary_strip)
+        self.reproduce_btn.setIcon(make_icon("replay", TOKENS.text_primary, 14))
+        self.reproduce_btn.clicked.connect(self._on_toggle_reproduce)
+
+        self.process_btn = QPushButton("Process Session", primary_strip)
+        self.process_btn.setObjectName("primaryButton")
+        self.process_btn.setIcon(make_icon("spark", TOKENS.accent_fg, 14))
+        self.process_btn.clicked.connect(self.process_current_session)
+
+        primary_row.addWidget(self.summary_label, stretch=1)
+        primary_row.addWidget(self.reproduce_btn)
+        primary_row.addWidget(self.process_btn)
+
+        # Tier 2: Secondary utility bar (Video | Export | View)
+        utility_row = QHBoxLayout()
+        utility_row.setSpacing(6)
+
+        self.watch_video_btn = QPushButton("Watch Video", self)
+        self.watch_video_btn.setIcon(make_icon("video", TOKENS.text_primary, 14))
+        self.watch_video_btn.clicked.connect(self._on_watch_video)
+
+        self.delete_video_btn = QPushButton("Delete Video", self)
+        self.delete_video_btn.setObjectName("subtleDangerButton")
+        self.delete_video_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 14))
+        self.delete_video_btn.clicked.connect(self._on_delete_video)
+
+        self.export_json_btn = QPushButton("Export JSON", self)
+        self.export_json_btn.setIcon(make_icon("export", TOKENS.text_primary, 14))
+        self.export_json_btn.clicked.connect(self._on_export_json)
+
+        self.export_pdf_btn = QPushButton("Export PDF", self)
+        self.export_pdf_btn.setIcon(make_icon("export", TOKENS.text_primary, 14))
+        self.export_pdf_btn.clicked.connect(self._on_export_pdf)
 
         self.show_all_steps_btn = QPushButton("Show All Steps", self)
         self.show_all_steps_btn.setCheckable(True)
         self.show_all_steps_btn.toggled.connect(self._refresh_timeline_table)
 
-        self.watch_video_btn = QPushButton("Watch Video", self)
-        self.watch_video_btn.clicked.connect(self._on_watch_video)
+        utility_row.addWidget(self.watch_video_btn)
+        utility_row.addWidget(self.delete_video_btn)
+        utility_row.addWidget(make_vseparator(self))
+        utility_row.addWidget(self.export_json_btn)
+        utility_row.addWidget(self.export_pdf_btn)
+        utility_row.addStretch(1)
+        utility_row.addWidget(self.show_all_steps_btn)
 
-        self.delete_video_btn = QPushButton("Delete Video", self)
-        self.delete_video_btn.clicked.connect(self._on_delete_video)
-
-        self.reproduce_btn = QPushButton("Reproduce", self)
-        self.reproduce_btn.clicked.connect(self._on_toggle_reproduce)
-
-        self.export_json_btn = QPushButton("Export JSON", self)
-        self.export_json_btn.clicked.connect(self._on_export_json)
-
-        self.export_pdf_btn = QPushButton("Export PDF", self)
-        self.export_pdf_btn.clicked.connect(self._on_export_pdf)
-
-        self.process_btn = QPushButton("Process Session", self)
-        self.process_btn.setObjectName("primaryButton")
-        self.process_btn.clicked.connect(self.process_current_session)
-
-        toolbar.addWidget(self.summary_label, stretch=1)
-        toolbar.addWidget(self.watch_video_btn)
-        toolbar.addWidget(self.delete_video_btn)
-        toolbar.addWidget(self.reproduce_btn)
-        toolbar.addWidget(self.export_json_btn)
-        toolbar.addWidget(self.export_pdf_btn)
-        toolbar.addWidget(self.show_all_steps_btn)
-        toolbar.addWidget(self.process_btn)
+        self._activity_bar = QProgressBar(self)
+        self._activity_bar.setRange(0, 0)
+        self._activity_bar.setTextVisible(False)
+        self._activity_bar.hide()
 
         # Main horizontal splitter: Scenarios (left) | Timeline + Evidence Inspector (right)
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -171,27 +205,40 @@ class ReviewWidget(QWidget):
 
         self.scenarios_list = QListWidget(scenarios_pane)
         self.scenarios_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.scenarios_list.setToolTip(
+            "Click a scenario to filter the timeline. "
+            "Hold Ctrl or Shift to select multiple for merging."
+        )
         self.scenarios_list.itemSelectionChanged.connect(self._on_scenario_selection_changed)
 
         row1 = QHBoxLayout()
+        row1.setSpacing(6)
         self.rename_btn = QPushButton("Rename", scenarios_pane)
+        self.rename_btn.setIcon(make_icon("edit", TOKENS.text_primary, 13))
         self.rename_btn.clicked.connect(self._on_rename_scenario)
         self.toggle_include_btn = QPushButton("Exclude", scenarios_pane)
         self.toggle_include_btn.clicked.connect(self._on_toggle_include)
         self.delete_btn = QPushButton("Delete", scenarios_pane)
+        self.delete_btn.setObjectName("subtleDangerButton")
+        self.delete_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 13))
         self.delete_btn.clicked.connect(self._on_delete_scenario)
         row1.addWidget(self.rename_btn)
         row1.addWidget(self.toggle_include_btn)
         row1.addWidget(self.delete_btn)
 
         row2 = QHBoxLayout()
+        row2.setSpacing(6)
         self.merge_btn = QPushButton("Merge", scenarios_pane)
+        self.merge_btn.setIcon(make_icon("merge", TOKENS.text_primary, 13))
         self.merge_btn.clicked.connect(self._on_merge_scenarios)
         self.split_btn = QPushButton("Split Here", scenarios_pane)
+        self.split_btn.setIcon(make_icon("split", TOKENS.text_primary, 13))
         self.split_btn.clicked.connect(self._on_split_scenario)
         self.move_up_btn = QPushButton("Up", scenarios_pane)
+        self.move_up_btn.setIcon(make_icon("up", TOKENS.text_primary, 13))
         self.move_up_btn.clicked.connect(lambda: self._on_move_scenario(-1))
         self.move_down_btn = QPushButton("Down", scenarios_pane)
+        self.move_down_btn.setIcon(make_icon("down", TOKENS.text_primary, 13))
         self.move_down_btn.clicked.connect(lambda: self._on_move_scenario(1))
         row2.addWidget(self.merge_btn)
         row2.addWidget(self.split_btn)
@@ -218,6 +265,8 @@ class ReviewWidget(QWidget):
         self.timeline_table.setHorizontalHeaderLabels(
             ["#", "Time", "Action", "Summary", "Correlated Outcomes", "Evidence"]
         )
+        self.timeline_table.setAlternatingRowColors(True)
+        self.timeline_table.setShowGrid(False)
         self.timeline_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.timeline_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.timeline_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -251,8 +300,9 @@ class ReviewWidget(QWidget):
         inspector_layout.setSpacing(4)
 
         inspector_title = QLabel("Step Evidence & Traceability", inspector_pane)
-        inspector_title.setObjectName("mutedLabel")
+        inspector_title.setObjectName("sectionTitle")
         self.evidence_inspector = QPlainTextEdit(inspector_pane)
+        self.evidence_inspector.setObjectName("codePreview")
         self.evidence_inspector.setReadOnly(True)
         self.evidence_inspector.setPlaceholderText(
             "Select a timeline step to inspect target metadata, "
@@ -268,9 +318,11 @@ class ReviewWidget(QWidget):
         splitter.addWidget(right_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([280, 620])
+        splitter.setSizes([290, 660])
 
-        layout.addLayout(toolbar)
+        layout.addWidget(primary_strip)
+        layout.addLayout(utility_row)
+        layout.addWidget(self._activity_bar)
         layout.addWidget(splitter, stretch=1)
 
     def load_session(self, session_id: str | None, session_name: str = "") -> None:
@@ -403,6 +455,12 @@ class ReviewWidget(QWidget):
             text = f"{scenario.order_index}. {prefix} {scenario.name} ({step_count})"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, scenario.id)
+            if not scenario.included:
+                item.setForeground(QColor(TOKENS.text_muted))
+            inc_note = (
+                "Included in generated tests" if scenario.included else "Excluded from generation"
+            )
+            item.setToolTip(f"{scenario.name}\n{step_count} step(s) — {inc_note}")
             self.scenarios_list.addItem(item)
 
         if 0 <= select_index < self.scenarios_list.count():
@@ -441,11 +499,20 @@ class ReviewWidget(QWidget):
             outcomes_text = "; ".join(o.summary for o in event.outcomes) if event.outcomes else "-"
             evidence_text = f"{len(event.raw_event_ids)} raw"
             time_text = event.started_at.strftime("%H:%M:%S.%f")[:-3]
+
+            action_item = QTableWidgetItem(event.action_type.value)
+            action_item.setForeground(QColor(TOKENS.accent_hover))
+            outcomes_item = QTableWidgetItem(outcomes_text)
+            if event.outcomes:
+                outcomes_item.setForeground(QColor(TOKENS.info_fg))
+            else:
+                outcomes_item.setForeground(QColor(TOKENS.text_muted))
+
             self.timeline_table.setItem(row_idx, 0, QTableWidgetItem(str(event.order_index)))
             self.timeline_table.setItem(row_idx, 1, QTableWidgetItem(time_text))
-            self.timeline_table.setItem(row_idx, 2, QTableWidgetItem(event.action_type.value))
+            self.timeline_table.setItem(row_idx, 2, action_item)
             self.timeline_table.setItem(row_idx, 3, QTableWidgetItem(event.summary))
-            self.timeline_table.setItem(row_idx, 4, QTableWidgetItem(outcomes_text))
+            self.timeline_table.setItem(row_idx, 4, outcomes_item)
             self.timeline_table.setItem(row_idx, 5, QTableWidgetItem(evidence_text))
 
         self._render_default_inspector()
@@ -623,7 +690,6 @@ class ReviewWidget(QWidget):
             )
             self._update_controls()
             return
-        # Open the primary (largest) recorded video with the system media player.
         primary = max(self._video_artifacts, key=lambda rec: rec.size_bytes)
         video_path = self._artifacts.resolve_path(primary.relative_path)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(video_path)))
@@ -696,7 +762,12 @@ class ReviewWidget(QWidget):
     def _on_toggle_reproduce(self) -> None:
         if self._repro_worker is not None:
             self._repro_worker.request_cancel()
-            self.reproduce_btn.setEnabled(False)
+            set_button_state(
+                self.reproduce_btn,
+                False,
+                enabled_tip="Cancel live reproduction.",
+                disabled_tip="Stopping live reproduction...",
+            )
             self.summary_label.setText("Stopping live reproduction...")
             return
 
@@ -775,6 +846,13 @@ class ReviewWidget(QWidget):
         self.processing_finished.emit()
         QMessageBox.warning(self, "Reproduction Failed", error_message)
 
+    @staticmethod
+    def _repolish(widget: QWidget) -> None:
+        style = widget.style()
+        if style is not None:
+            style.unpolish(widget)
+            style.polish(widget)
+
     def _update_controls(self) -> None:
         has_session = self._session_id is not None
         reproducing = self._repro_worker is not None
@@ -785,34 +863,162 @@ class ReviewWidget(QWidget):
         has_timeline = bool(self._timeline)
         has_video = bool(self._video_artifacts)
 
-        self.process_btn.setEnabled(has_session and not busy)
-        self.show_all_steps_btn.setEnabled(has_session and not busy and has_timeline)
-        self.watch_video_btn.setEnabled(has_session and has_video and not reproducing)
-        self.delete_video_btn.setEnabled(has_session and has_video and not busy)
+        self._activity_bar.setVisible(self._worker is not None or reproducing)
+
+        busy_tip = "Wait for the active background task to finish."
+
+        set_button_state(
+            self.process_btn,
+            has_session and not busy,
+            enabled_tip="Normalize raw events, correlate outcomes, and detect logical scenarios.",
+            disabled_tip=busy_tip if busy else "Select a recording session first.",
+        )
+        set_button_state(
+            self.show_all_steps_btn,
+            has_session and not busy and has_timeline,
+            enabled_tip="Toggle between all session steps and only the selected scenario's steps.",
+            disabled_tip=busy_tip if busy else "Process a session first to view timeline steps.",
+        )
+        set_button_state(
+            self.watch_video_btn,
+            has_session and has_video and not reproducing,
+            enabled_tip="Open the recorded session video (.webm) in your default media player.",
+            disabled_tip=(
+                "Stop reproduction before watching video."
+                if reproducing
+                else "No recording video was captured for this session."
+            ),
+        )
+        set_button_state(
+            self.delete_video_btn,
+            has_session and has_video and not busy,
+            enabled_tip="Delete the recorded video file(s) for this session from disk.",
+            disabled_tip=busy_tip if busy else "No recording video to delete.",
+        )
+
         self.reproduce_btn.setText("Stop Replay" if reproducing else "Reproduce")
-        self.reproduce_btn.setEnabled(reproducing or (has_session and has_timeline and not busy))
+        self.reproduce_btn.setObjectName("dangerButton" if reproducing else "")
+        self.reproduce_btn.setIcon(
+            make_icon("stop", "#FFFFFF", 14)
+            if reproducing
+            else make_icon("replay", TOKENS.text_primary, 14)
+        )
+        self._repolish(self.reproduce_btn)
+        set_button_state(
+            self.reproduce_btn,
+            reproducing or (has_session and has_timeline and not busy),
+            enabled_tip=(
+                "Cancel live browser reproduction."
+                if reproducing
+                else "Replay all processed steps live in headed Chromium to reproduce the issue."
+            ),
+            disabled_tip=(
+                busy_tip if busy else "Process a session with at least one step to reproduce it."
+            ),
+        )
+
         can_export = has_session and has_timeline and not busy and self._bundle_service is not None
-        self.export_json_btn.setEnabled(can_export)
-        self.export_pdf_btn.setEnabled(can_export)
-        self.rename_btn.setEnabled(single and not busy)
-        self.toggle_include_btn.setEnabled(single and not busy)
-        self.delete_btn.setEnabled(single and not busy)
-        self.merge_btn.setEnabled(multi and not busy)
+        set_button_state(
+            self.export_json_btn,
+            can_export,
+            enabled_tip=(
+                "Export this processed recording and its scenarios as a portable JSON bundle."
+            ),
+            disabled_tip=busy_tip if busy else "Process a session first to export JSON.",
+        )
+        set_button_state(
+            self.export_pdf_btn,
+            can_export,
+            enabled_tip=(
+                "Generate a formatted A4 PDF report of this recording's steps and scenarios."
+            ),
+            disabled_tip=busy_tip if busy else "Process a session first to export a PDF report.",
+        )
+
+        set_button_state(
+            self.rename_btn,
+            single and not busy,
+            enabled_tip="Rename the selected scenario.",
+            disabled_tip=busy_tip if busy else "Select a single scenario to rename.",
+        )
+        set_button_state(
+            self.toggle_include_btn,
+            single and not busy,
+            enabled_tip="Toggle whether this scenario is included in generated test definitions.",
+            disabled_tip=busy_tip if busy else "Select a single scenario to include or exclude.",
+        )
+        set_button_state(
+            self.delete_btn,
+            single and not busy,
+            enabled_tip="Remove the selected scenario from this session.",
+            disabled_tip=busy_tip if busy else "Select a single scenario to delete.",
+        )
+        set_button_state(
+            self.merge_btn,
+            multi and not busy,
+            enabled_tip="Merge the selected scenarios into a single continuous scenario.",
+            disabled_tip=(
+                busy_tip if busy else "Hold Ctrl or Shift and select 2 or more scenarios to merge."
+            ),
+        )
 
         if single and not busy:
             sc = selected[0]
             self.toggle_include_btn.setText("Exclude" if sc.included else "Include")
             idx = self._scenarios.index(sc)
-            self.move_up_btn.setEnabled(idx > 0)
-            self.move_down_btn.setEnabled(idx < len(self._scenarios) - 1)
+            set_button_state(
+                self.move_up_btn,
+                idx > 0,
+                enabled_tip="Move this scenario earlier in execution order.",
+                disabled_tip="Scenario is already first.",
+            )
+            set_button_state(
+                self.move_down_btn,
+                idx < len(self._scenarios) - 1,
+                enabled_tip="Move this scenario later in execution order.",
+                disabled_tip="Scenario is already last.",
+            )
             can_split = (
                 not self.show_all_steps_btn.isChecked()
                 and len(sc.processed_event_ids) >= 2
                 and self.timeline_table.currentRow() >= 1
             )
-            self.split_btn.setEnabled(can_split)
+            split_reason = (
+                "Turn off 'Show All Steps' to split a scenario."
+                if self.show_all_steps_btn.isChecked()
+                else (
+                    "Scenario needs at least 2 steps to split."
+                    if len(sc.processed_event_ids) < 2
+                    else "Select step 2 or later in the timeline table to split here."
+                )
+            )
+            set_button_state(
+                self.split_btn,
+                can_split,
+                enabled_tip="Split this scenario into two starting at the selected timeline step.",
+                disabled_tip=split_reason,
+            )
         else:
             self.toggle_include_btn.setText("Exclude")
-            self.move_up_btn.setEnabled(False)
-            self.move_down_btn.setEnabled(False)
-            self.split_btn.setEnabled(False)
+            set_button_state(
+                self.move_up_btn,
+                False,
+                enabled_tip="Move scenario up.",
+                disabled_tip=busy_tip if busy else "Select a single scenario to reorder.",
+            )
+            set_button_state(
+                self.move_down_btn,
+                False,
+                enabled_tip="Move scenario down.",
+                disabled_tip=busy_tip if busy else "Select a single scenario to reorder.",
+            )
+            set_button_state(
+                self.split_btn,
+                False,
+                enabled_tip="Split scenario at selected step.",
+                disabled_tip=(
+                    busy_tip
+                    if busy
+                    else "Select a single scenario and pick step 2+ in the timeline to split."
+                ),
+            )

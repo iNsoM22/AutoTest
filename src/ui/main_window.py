@@ -7,7 +7,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -52,6 +52,13 @@ from src.ui.definitions_widget import DefinitionsWidget
 from src.ui.dialogs import ProjectDialog
 from src.ui.execution_widget import ExecutionWidget
 from src.ui.review_widget import ReviewWidget
+from src.ui.theme import (
+    TOKENS,
+    make_hseparator,
+    make_icon,
+    set_button_state,
+    status_color,
+)
 from src.ui.workers import BrowserManagerFactory, BrowserSessionWorker
 from src.utils import target_label
 
@@ -104,121 +111,273 @@ class MainWindow(QMainWindow):
         self._active_worker: BrowserSessionWorker | None = None
         self._tracked_pages: dict[str, PageInfo] = {}
         self._event_count: int = 0
+        self._step_pills: list[tuple[QPushButton, list[int]]] = []
 
         self.setWindowTitle(f"AutoTest v{__version__}")
-        self.resize(1180, 740)
+        self.setWindowIcon(make_icon("brand", size=24))
+        self.resize(1260, 780)
+        self.setMinimumSize(980, 640)
 
         self._build_ui()
+        self._register_shortcuts()
         self._refresh_projects()
+
+    def _register_shortcuts(self) -> None:
+        new_proj = QShortcut(QKeySequence("Ctrl+N"), self)
+        new_proj.activated.connect(self._trigger_new_project_shortcut)
+        import_rec = QShortcut(QKeySequence("Ctrl+Shift+I"), self)
+        import_rec.activated.connect(self._trigger_import_shortcut)
+
+    def _trigger_new_project_shortcut(self) -> None:
+        if self.new_project_btn.isEnabled():
+            self._on_new_project()
+
+    def _trigger_import_shortcut(self) -> None:
+        if self.import_recording_btn.isEnabled():
+            self._on_import_recording()
 
     def _build_ui(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter.setHandleWidth(4)
         splitter.addWidget(self._build_sidebar())
         splitter.addWidget(self._build_workspace())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([280, 900])
+        splitter.setSizes([268, 992])
 
         self.setCentralWidget(splitter)
 
         status_bar = QStatusBar(self)
-        status_bar.showMessage(f"Ready | Database: {self._settings.db_path}")
+        status_bar.setSizeGripEnabled(True)
+        status_bar.showMessage(f"Ready  |  Database: {self._settings.db_path}")
         self.setStatusBar(status_bar)
 
     def _build_sidebar(self) -> QWidget:
         panel = QWidget(self)
+        panel.setObjectName("sidebarPanel")
+        panel.setMinimumWidth(236)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 14, 10, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 16, 14, 14)
+        layout.setSpacing(12)
 
+        # Brand identity header
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(9)
+        logo_label = QLabel(panel)
+        logo_label.setPixmap(make_icon("brand", size=24).pixmap(24, 24))
+        brand_name = QLabel("AutoTest", panel)
+        brand_name.setObjectName("brandTitle")
+        version_badge = QLabel(f"v{__version__}", panel)
+        version_badge.setObjectName("brandVersion")
+        brand_row.addWidget(logo_label)
+        brand_row.addWidget(brand_name)
+        brand_row.addWidget(version_badge)
+        brand_row.addStretch(1)
+
+        layout.addLayout(brand_row)
+        layout.addWidget(make_hseparator(panel))
+
+        # Section header + count
+        section_row = QHBoxLayout()
         title = QLabel("Projects", panel)
         title.setObjectName("sectionTitle")
+        self.project_count_label = QLabel("0", panel)
+        self.project_count_label.setObjectName("mutedLabel")
+        section_row.addWidget(title)
+        section_row.addStretch(1)
+        section_row.addWidget(self.project_count_label)
 
         self.project_list = QListWidget(panel)
+        self.project_list.setToolTip(
+            "Select a project to inspect its sessions, scenarios, and tests."
+        )
         self.project_list.currentItemChanged.connect(self._on_project_selection_changed)
 
+        self.sidebar_empty_hint = QLabel(
+            "No projects yet. Click New to create your first test workspace.",
+            panel,
+        )
+        self.sidebar_empty_hint.setObjectName("hintBanner")
+        self.sidebar_empty_hint.setWordWrap(True)
+
         btn_row = QHBoxLayout()
-        self.new_project_btn = QPushButton("+ New", panel)
+        btn_row.setSpacing(6)
+        self.new_project_btn = QPushButton("New", panel)
         self.new_project_btn.setObjectName("primaryButton")
+        self.new_project_btn.setIcon(make_icon("plus", TOKENS.accent_fg, 14))
         self.new_project_btn.clicked.connect(self._on_new_project)
 
         self.edit_project_btn = QPushButton("Edit", panel)
+        self.edit_project_btn.setIcon(make_icon("edit", TOKENS.text_primary, 14))
         self.edit_project_btn.clicked.connect(self._on_edit_project)
 
         self.delete_project_btn = QPushButton("Delete", panel)
+        self.delete_project_btn.setObjectName("subtleDangerButton")
+        self.delete_project_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 14))
         self.delete_project_btn.clicked.connect(self._on_delete_project)
 
         btn_row.addWidget(self.new_project_btn)
         btn_row.addWidget(self.edit_project_btn)
         btn_row.addWidget(self.delete_project_btn)
 
-        layout.addWidget(title)
+        layout.addLayout(section_row)
+        layout.addWidget(self.sidebar_empty_hint)
         layout.addWidget(self.project_list, stretch=1)
         layout.addLayout(btn_row)
         return panel
 
     def _build_workspace(self) -> QWidget:
         panel = QWidget(self)
+        panel.setObjectName("workspacePanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(14)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
 
-        # Header card
+        # Header card: Project title + Status badge + Workflow Pipeline Stepper
+        header_card = QFrame(panel)
+        header_card.setObjectName("surfaceCard")
+        header_card_layout = QVBoxLayout(header_card)
+        header_card_layout.setContentsMargins(16, 12, 16, 10)
+        header_card_layout.setSpacing(10)
+
         header_row = QHBoxLayout()
         header_text = QVBoxLayout()
-        self.project_title_label = QLabel("No Project Selected", panel)
+        header_text.setSpacing(2)
+        self.project_title_label = QLabel("No Project Selected", header_card)
         self.project_title_label.setObjectName("projectTitle")
         self.project_meta_label = QLabel(
             "Create or select a project on the left to start a recording session.",
-            panel,
+            header_card,
         )
         self.project_meta_label.setObjectName("mutedLabel")
         self.project_meta_label.setWordWrap(True)
         header_text.addWidget(self.project_title_label)
         header_text.addWidget(self.project_meta_label)
 
-        self.status_badge = QLabel("Idle", panel)
+        self.status_badge = QLabel("Idle", header_card)
         self.status_badge.setObjectName("statusBadge")
         self.status_badge.setProperty("state", "idle")
         self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_badge.setFixedHeight(28)
+        self.status_badge.setToolTip("Current browser recording session status.")
 
         header_row.addLayout(header_text, stretch=1)
         header_row.addWidget(self.status_badge, alignment=Qt.AlignmentFlag.AlignTop)
 
-        # Divider
-        divider = QFrame(panel)
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet("color: #2e3440;")
+        self.tabs = QTabWidget(panel)
+        self.tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # Workflow stepper row
+        stepper_row = QHBoxLayout()
+        stepper_row.setSpacing(4)
+        stepper_label = QLabel("Workflow:", header_card)
+        stepper_label.setObjectName("mutedLabel")
+        stepper_row.addWidget(stepper_label)
+        stepper_row.addSpacing(4)
+
+        self._step_pills = []
+        stage_specs: list[tuple[str, str, list[int], int]] = [
+            ("1. Record", "Capture browser interactions in a clean Chromium profile", [0, 1, 2], 0),
+        ]
+        next_tab_idx = 3
+        if self._scenario_service is not None:
+            stage_specs.append(
+                (
+                    "2. Review",
+                    "Inspect correlated timeline, video, scenarios, and exports",
+                    [next_tab_idx],
+                    next_tab_idx,
+                )
+            )
+            next_tab_idx += 1
+        if self._definition_service is not None:
+            stage_specs.append(
+                (
+                    "3. Definitions",
+                    "Edit selectors, assertions, and copy or export Pytest code",
+                    [next_tab_idx],
+                    next_tab_idx,
+                )
+            )
+            next_tab_idx += 1
+        if self._execution_service is not None and self._definition_service is not None:
+            stage_specs.append(
+                (
+                    "4. Execute",
+                    "Run tests locally with live logs, screenshots, and Playwright traces",
+                    [next_tab_idx],
+                    next_tab_idx,
+                )
+            )
+
+        for idx, (label, tip, tab_indices, target_idx) in enumerate(stage_specs):
+            if idx > 0:
+                arrow = QLabel("›", header_card)
+                arrow.setObjectName("stepArrow")
+                stepper_row.addWidget(arrow)
+            pill = QPushButton(label, header_card)
+            pill.setObjectName("stepPill")
+            pill.setToolTip(tip)
+            pill.setCursor(Qt.CursorShape.PointingHandCursor)
+            pill.clicked.connect(
+                lambda _checked=False, ti=target_idx: self.tabs.setCurrentIndex(ti)
+            )
+            stepper_row.addWidget(pill)
+            self._step_pills.append((pill, tab_indices))
+        stepper_row.addStretch(1)
+
+        header_card_layout.addLayout(header_row)
+        header_card_layout.addWidget(make_hseparator(header_card))
+        header_card_layout.addLayout(stepper_row)
 
         # Session control bar
-        control_row = QHBoxLayout()
-        url_label = QLabel("Start URL:", panel)
-        self.start_url_input = QLineEdit(panel)
-        self.start_url_input.setPlaceholderText("https://example.com")
+        control_frame = QFrame(panel)
+        control_frame.setObjectName("toolbarStrip")
+        control_row = QHBoxLayout(control_frame)
+        control_row.setContentsMargins(12, 8, 12, 8)
+        control_row.setSpacing(10)
 
-        self.record_toggle_btn = QPushButton("Start Recording", panel)
+        url_label = QLabel("Start URL", control_frame)
+        url_label.setObjectName("mutedLabel")
+        self.start_url_input = QLineEdit(control_frame)
+        self.start_url_input.setPlaceholderText(
+            "https://example.com  (optional — defaults to blank tab)"
+        )
+        self.start_url_input.setToolTip(
+            "Initial URL loaded when launching the dedicated recording browser."
+        )
+
+        self.record_toggle_btn = QPushButton("Start Recording", control_frame)
         self.record_toggle_btn.setObjectName("primaryButton")
-        self.record_toggle_btn.setMinimumWidth(148)
+        self.record_toggle_btn.setIcon(make_icon("record", TOKENS.accent_fg, 15))
+        self.record_toggle_btn.setMinimumWidth(154)
         self.record_toggle_btn.clicked.connect(self._on_toggle_recording)
 
         control_row.addWidget(url_label)
         control_row.addWidget(self.start_url_input, stretch=1)
         control_row.addWidget(self.record_toggle_btn)
 
-        # Workspace tabs
-        self.tabs = QTabWidget(panel)
+        # Workspace tabs (created above so stepper pills bind cleanly)
 
         # Tab 1: Sessions table
         sessions_tab = QWidget(panel)
         sessions_layout = QVBoxLayout(sessions_tab)
-        sessions_layout.setContentsMargins(10, 10, 10, 10)
-        sessions_layout.setSpacing(8)
+        sessions_layout.setContentsMargins(12, 12, 12, 12)
+        sessions_layout.setSpacing(10)
+
+        self.sessions_hint_label = QLabel(
+            "Start a recording above or import a previously exported JSON recording to begin.",
+            sessions_tab,
+        )
+        self.sessions_hint_label.setObjectName("hintBanner")
+        self.sessions_hint_label.setWordWrap(True)
 
         self.sessions_table = QTableWidget(0, 6, sessions_tab)
         self.sessions_table.setHorizontalHeaderLabels(
             ["Session", "Status", "Events", "Start URL", "Started", "Ended"]
         )
+        self.sessions_table.setAlternatingRowColors(True)
+        self.sessions_table.setShowGrid(False)
         self.sessions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.sessions_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.sessions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -232,18 +391,24 @@ class MainWindow(QMainWindow):
         self.sessions_table.itemSelectionChanged.connect(self._on_session_selection_changed)
 
         sessions_actions = QHBoxLayout()
+        sessions_actions.setSpacing(8)
         self.import_recording_btn = QPushButton("Import Recording (JSON)", sessions_tab)
+        self.import_recording_btn.setIcon(make_icon("import", TOKENS.text_primary, 14))
         self.import_recording_btn.clicked.connect(self._on_import_recording)
         sessions_actions.addWidget(self.import_recording_btn)
         sessions_actions.addStretch(1)
         self.review_session_btn = QPushButton("Process & Review", sessions_tab)
         self.review_session_btn.setObjectName("primaryButton")
+        self.review_session_btn.setIcon(make_icon("spark", TOKENS.accent_fg, 14))
         self.review_session_btn.clicked.connect(self._on_review_selected_session)
         self.delete_session_btn = QPushButton("Delete Selected Session", sessions_tab)
+        self.delete_session_btn.setObjectName("subtleDangerButton")
+        self.delete_session_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 14))
         self.delete_session_btn.clicked.connect(self._on_delete_session)
         sessions_actions.addWidget(self.review_session_btn)
         sessions_actions.addWidget(self.delete_session_btn)
 
+        sessions_layout.addWidget(self.sessions_hint_label)
         sessions_layout.addWidget(self.sessions_table, stretch=1)
         sessions_layout.addLayout(sessions_actions)
         self.tabs.addTab(sessions_tab, "Recording Sessions")
@@ -251,10 +416,14 @@ class MainWindow(QMainWindow):
         # Tab 2: Tracked browser tabs
         pages_tab = QWidget(panel)
         pages_layout = QVBoxLayout(pages_tab)
-        pages_layout.setContentsMargins(10, 10, 10, 10)
+        pages_layout.setContentsMargins(12, 12, 12, 12)
+        pages_layout.setSpacing(8)
 
         self.pages_table = QTableWidget(0, 4, pages_tab)
         self.pages_table.setHorizontalHeaderLabels(["Tab #", "Title", "URL", "State"])
+        self.pages_table.setAlternatingRowColors(True)
+        self.pages_table.setShowGrid(False)
+        self.pages_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.pages_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.pages_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
@@ -267,12 +436,16 @@ class MainWindow(QMainWindow):
         # Tab 3: Recorded raw events
         events_tab = QWidget(panel)
         events_layout = QVBoxLayout(events_tab)
-        events_layout.setContentsMargins(10, 10, 10, 10)
+        events_layout.setContentsMargins(12, 12, 12, 12)
+        events_layout.setSpacing(8)
 
         self.events_table = QTableWidget(0, 5, events_tab)
         self.events_table.setHorizontalHeaderLabels(
             ["#", "Event Type", "Source", "Target / Details", "Timestamp"]
         )
+        self.events_table.setAlternatingRowColors(True)
+        self.events_table.setShowGrid(False)
+        self.events_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.events_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.events_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
@@ -325,12 +498,18 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(self.execution_widget, "Test Execution")
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self._sync_stepper(0)
 
-        layout.addLayout(header_row)
-        layout.addWidget(divider)
-        layout.addLayout(control_row)
+        layout.addWidget(header_card)
+        layout.addWidget(control_frame)
         layout.addWidget(self.tabs, stretch=1)
         return panel
+
+    def _sync_stepper(self, tab_index: int) -> None:
+        for pill, indices in self._step_pills:
+            is_active = tab_index in indices
+            pill.setProperty("active", "true" if is_active else "false")
+            self._repolish(pill)
 
     # --- Project management handlers ---
 
@@ -338,6 +517,8 @@ class MainWindow(QMainWindow):
         target_id = select_project_id or self._selected_project_id
         projects = self._project_service.list_projects()
         self._projects = {p.id: p for p in projects}
+        self.project_count_label.setText(str(len(projects)))
+        self.sidebar_empty_hint.setVisible(not projects)
 
         self.project_list.blockSignals(True)
         self.project_list.clear()
@@ -345,6 +526,8 @@ class MainWindow(QMainWindow):
         for idx, project in enumerate(projects):
             item = QListWidgetItem(project.name)
             item.setData(Qt.ItemDataRole.UserRole, project.id)
+            if project.base_url:
+                item.setToolTip(f"{project.name}\n{project.base_url}")
             self.project_list.addItem(item)
             if project.id == target_id:
                 selected_row = idx
@@ -382,6 +565,15 @@ class MainWindow(QMainWindow):
             self._active_worker is not None or self._is_execution_running() or self._is_processing()
         )
 
+    def _busy_reason(self) -> str:
+        if self._active_worker is not None:
+            return "Unavailable while a recording session is active."
+        if self._is_execution_running():
+            return "Unavailable while tests are running."
+        if self._is_processing():
+            return "Unavailable while session processing or reproduction is running."
+        return ""
+
     def _on_scenarios_changed(self, session_id: str) -> None:
         if self.definitions_widget is not None:
             self.definitions_widget.refresh(session_id)
@@ -393,6 +585,7 @@ class MainWindow(QMainWindow):
             self.execution_widget.refresh()
 
     def _on_tab_changed(self, index: int) -> None:
+        self._sync_stepper(index)
         widget = self.tabs.widget(index)
         if (
             self.execution_widget is not None
@@ -407,25 +600,85 @@ class MainWindow(QMainWindow):
     def _sync_busy_controls(self) -> None:
         has_active_session = self._active_worker is not None
         is_busy = self._is_busy()
+        busy_tip = self._busy_reason()
         self._sync_tab_locks()
         has_project = self._projects.get(self._selected_project_id or "") is not None
         has_sessions = self.sessions_table.rowCount() > 0
+        has_selected_session = has_sessions and self.sessions_table.currentRow() >= 0
 
-        self.edit_project_btn.setEnabled(has_project and not is_busy)
-        self.delete_project_btn.setEnabled(has_project and not is_busy)
-        self.new_project_btn.setEnabled(not is_busy)
+        set_button_state(
+            self.new_project_btn,
+            not is_busy,
+            enabled_tip="Create a new AutoTest project (Ctrl+N).",
+            disabled_tip=busy_tip,
+        )
+        set_button_state(
+            self.edit_project_btn,
+            has_project and not is_busy,
+            enabled_tip="Edit the selected project's name, base URL, or description.",
+            disabled_tip=busy_tip if is_busy else "Select a project to edit.",
+        )
+        set_button_state(
+            self.delete_project_btn,
+            has_project and not is_busy,
+            enabled_tip="Permanently delete the selected project and all its sessions.",
+            disabled_tip=busy_tip if is_busy else "Select a project to delete.",
+        )
         self.project_list.setEnabled(not is_busy)
         self.start_url_input.setEnabled(has_project and not is_busy)
-        self.record_toggle_btn.setEnabled(
-            has_project
-            and (has_active_session or not (self._is_execution_running() or self._is_processing()))
+
+        can_toggle_record = has_project and (
+            has_active_session or not (self._is_execution_running() or self._is_processing())
         )
-        self.delete_session_btn.setEnabled(has_sessions and not is_busy)
-        self.review_session_btn.setEnabled(
-            has_sessions and not is_busy and self.review_widget is not None
+        if has_active_session:
+            set_button_state(
+                self.record_toggle_btn,
+                can_toggle_record,
+                enabled_tip="Stop the active Chromium recording session and save captured events.",
+                disabled_tip="Stopping active session...",
+            )
+        else:
+            set_button_state(
+                self.record_toggle_btn,
+                can_toggle_record,
+                enabled_tip="Launch dedicated Chromium and record browser interactions.",
+                disabled_tip=(
+                    busy_tip if is_busy else "Create or select a project to start recording."
+                ),
+            )
+
+        set_button_state(
+            self.delete_session_btn,
+            has_selected_session and not is_busy,
+            enabled_tip="Delete the selected recording session and its artifacts.",
+            disabled_tip=(
+                busy_tip
+                if is_busy
+                else (
+                    "Select a recording session to delete." if has_sessions else "No sessions yet."
+                )
+            ),
         )
-        self.import_recording_btn.setEnabled(
-            has_project and not is_busy and self._recording_bundle_service is not None
+        set_button_state(
+            self.review_session_btn,
+            has_sessions and not is_busy and self.review_widget is not None,
+            enabled_tip="Process raw events into a correlated timeline and detected scenarios.",
+            disabled_tip=(
+                busy_tip
+                if is_busy
+                else "Record or import a session first to process and review it."
+            ),
+        )
+        set_button_state(
+            self.import_recording_btn,
+            has_project and not is_busy and self._recording_bundle_service is not None,
+            enabled_tip=(
+                "Import a previously exported processed recording (.json) "
+                "into this project (Ctrl+Shift+I)."
+            ),
+            disabled_tip=(
+                busy_tip if is_busy else "Select a project before importing a recording."
+            ),
         )
 
     def _sync_tab_locks(self) -> None:
@@ -440,15 +693,9 @@ class MainWindow(QMainWindow):
             self.execution_widget.set_external_busy(recording or processing)
 
     def _update_project_view(self) -> None:
-        has_active_session = self._active_worker is not None
         is_busy = self._is_busy()
         self._sync_tab_locks()
         project = self._projects.get(self._selected_project_id or "")
-
-        self.edit_project_btn.setEnabled(project is not None and not is_busy)
-        self.delete_project_btn.setEnabled(project is not None and not is_busy)
-        self.new_project_btn.setEnabled(not is_busy)
-        self.project_list.setEnabled(not is_busy)
 
         if project is None:
             self._loaded_project_id = None
@@ -457,13 +704,10 @@ class MainWindow(QMainWindow):
                 "Create or select a project on the left to start a recording session."
             )
             self.start_url_input.setText("")
-            self.start_url_input.setEnabled(False)
-            self.record_toggle_btn.setEnabled(False)
             self.sessions_table.setRowCount(0)
-            self.delete_session_btn.setEnabled(False)
-            self.review_session_btn.setEnabled(False)
-            self.import_recording_btn.setEnabled(False)
+            self.sessions_hint_label.setVisible(True)
             self._clear_session_tabs()
+            self._sync_busy_controls()
             return
 
         project_changed = project.id != self._loaded_project_id
@@ -475,19 +719,15 @@ class MainWindow(QMainWindow):
         if self.definitions_widget is not None:
             self.definitions_widget.set_base_url(project.base_url)
         meta_parts = [p for p in (project.base_url, project.description) if p]
-        self.project_meta_label.setText(" — ".join(meta_parts) if meta_parts else "No details yet.")
+        self.project_meta_label.setText(
+            "  |  ".join(meta_parts) if meta_parts else "No details yet."
+        )
         if not is_busy:
             self.start_url_input.setText(project.base_url)
-        self.start_url_input.setEnabled(not is_busy)
-        self.record_toggle_btn.setEnabled(
-            has_active_session or not (self._is_execution_running() or self._is_processing())
-        )
-        self.import_recording_btn.setEnabled(
-            not is_busy and self._recording_bundle_service is not None
-        )
         self._refresh_sessions(project.id)
         if project_changed and not is_busy and self.sessions_table.rowCount() > 0:
             self.sessions_table.selectRow(0)
+        self._sync_busy_controls()
 
     def _on_new_project(self) -> None:
         dialog = ProjectDialog(parent=self)
@@ -564,11 +804,8 @@ class MainWindow(QMainWindow):
         for row_idx, session in enumerate(sessions):
             self._populate_session_row(row_idx, session)
         self.sessions_table.blockSignals(False)
-        is_busy = self._is_busy()
-        self.delete_session_btn.setEnabled(bool(sessions) and not is_busy)
-        self.review_session_btn.setEnabled(
-            bool(sessions) and not is_busy and self.review_widget is not None
-        )
+        self.sessions_hint_label.setVisible(not sessions)
+        self._sync_busy_controls()
 
     def _populate_session_row(self, row_idx: int, session: RecordingSession) -> None:
         name_item = QTableWidgetItem(session.name)
@@ -579,14 +816,18 @@ class MainWindow(QMainWindow):
         )
         ended_str = session.ended_at.strftime("%Y-%m-%d %H:%M:%S") if session.ended_at else "-"
 
+        status_item = QTableWidgetItem(session.status.value)
+        status_item.setForeground(status_color(session.status.value))
+
         self.sessions_table.setItem(row_idx, 0, name_item)
-        self.sessions_table.setItem(row_idx, 1, QTableWidgetItem(session.status.value))
+        self.sessions_table.setItem(row_idx, 1, status_item)
         self.sessions_table.setItem(row_idx, 2, QTableWidgetItem(str(event_count)))
         self.sessions_table.setItem(row_idx, 3, QTableWidgetItem(session.start_url))
         self.sessions_table.setItem(row_idx, 4, QTableWidgetItem(started_str))
         self.sessions_table.setItem(row_idx, 5, QTableWidgetItem(ended_str))
 
     def _on_session_selection_changed(self) -> None:
+        self._sync_busy_controls()
         if self._is_busy():
             return
         row = self.sessions_table.currentRow()
@@ -735,6 +976,7 @@ class MainWindow(QMainWindow):
         self._set_status_badge("Launching...", "launching")
         self.record_toggle_btn.setText("Stop Recording")
         self.record_toggle_btn.setObjectName("dangerButton")
+        self.record_toggle_btn.setIcon(make_icon("stop", "#FFFFFF", 14))
         self._repolish(self.record_toggle_btn)
         self._update_project_view()
 
@@ -748,7 +990,12 @@ class MainWindow(QMainWindow):
         if self._active_worker is None:
             return
         self._set_status_badge("Stopping...", "launching")
-        self.record_toggle_btn.setEnabled(False)
+        set_button_state(
+            self.record_toggle_btn,
+            False,
+            enabled_tip="Stop the active recording session.",
+            disabled_tip="Stopping browser session and finalizing recorded video...",
+        )
         self.statusBar().showMessage("Stopping recording session...")
         self._active_worker.request_stop()
 
@@ -794,6 +1041,7 @@ class MainWindow(QMainWindow):
                 self.sessions_table.selectRow(row_idx)
                 self.sessions_table.blockSignals(False)
                 break
+        self._sync_busy_controls()
         self._bind_session_tabs(session_id, session_name)
         if (
             self.review_widget is not None
@@ -826,6 +1074,7 @@ class MainWindow(QMainWindow):
 
         self.record_toggle_btn.setText("Start Recording")
         self.record_toggle_btn.setObjectName("primaryButton")
+        self.record_toggle_btn.setIcon(make_icon("record", TOKENS.accent_fg, 15))
         self._repolish(self.record_toggle_btn)
         self._update_project_view()
 
@@ -833,12 +1082,13 @@ class MainWindow(QMainWindow):
         pages = sorted(self._tracked_pages.values(), key=lambda p: p.tab_index)
         self.pages_table.setRowCount(len(pages))
         for row_idx, page in enumerate(pages):
+            state_text = "Closed" if page.is_closed else "Open"
+            state_item = QTableWidgetItem(state_text)
+            state_item.setForeground(status_color(state_text))
             self.pages_table.setItem(row_idx, 0, QTableWidgetItem(str(page.tab_index + 1)))
             self.pages_table.setItem(row_idx, 1, QTableWidgetItem(page.title or "(untitled)"))
             self.pages_table.setItem(row_idx, 2, QTableWidgetItem(page.url))
-            self.pages_table.setItem(
-                row_idx, 3, QTableWidgetItem("Closed" if page.is_closed else "Open")
-            )
+            self.pages_table.setItem(row_idx, 3, state_item)
 
     def _load_session_pages(self, session_id: str) -> None:
         pages = self._session_service.list_pages(session_id)

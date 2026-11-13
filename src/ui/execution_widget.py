@@ -12,6 +12,7 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -37,6 +39,13 @@ from src.execution import (
     ExecutionService,
     TestCaseResult,
     TestRun,
+)
+from src.ui.theme import (
+    TOKENS,
+    make_icon,
+    make_vseparator,
+    set_button_state,
+    status_color,
 )
 from src.ui.workers import TestExecutionWorker
 
@@ -87,23 +96,51 @@ class ExecutionWidget(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
 
-        # Toolbar
-        toolbar = QHBoxLayout()
-        self.session_label = QLabel("No session selected.", self)
-        self.session_label.setObjectName("mutedLabel")
+        # Tier 1: Primary Run Control Bar
+        primary_frame = QFrame(self)
+        primary_frame.setObjectName("toolbarStrip")
+        primary_bar = QHBoxLayout(primary_frame)
+        primary_bar.setContentsMargins(12, 8, 12, 8)
+        primary_bar.setSpacing(8)
 
-        self.headed_checkbox = QCheckBox("Headed", self)
+        self.session_label = QLabel("No session selected.", primary_frame)
+        self.session_label.setObjectName("sectionTitle")
+
+        self.headed_checkbox = QCheckBox("Headed", primary_frame)
         self.headed_checkbox.setChecked(False)
+        self.headed_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.headed_checkbox.setToolTip(
+            "Launch a visible Chromium browser window during execution instead of running headless."
+        )
 
-        self.env_vars_btn = QPushButton("Env / Secrets", self)
+        self.env_vars_btn = QPushButton("Env / Secrets", primary_frame)
+        self.env_vars_btn.setIcon(make_icon("key", TOKENS.text_primary, 13))
         self.env_vars_btn.clicked.connect(self._on_edit_env_vars)
 
-        self.run_selected_btn = QPushButton("Run Selected", self)
+        self.run_selected_btn = QPushButton("Run Selected", primary_frame)
         self.run_selected_btn.setObjectName("primaryButton")
+        self.run_selected_btn.setIcon(make_icon("play", TOKENS.accent_fg, 13))
         self.run_selected_btn.clicked.connect(self._on_run_selected)
+
+        self.stop_btn = QPushButton("Stop", primary_frame)
+        self.stop_btn.setObjectName("dangerButton")
+        self.stop_btn.setIcon(make_icon("stop", "#FFFFFF", 13))
+        self.stop_btn.clicked.connect(self._on_stop)
+
+        primary_bar.addWidget(self.session_label, stretch=1)
+        primary_bar.addWidget(self.headed_checkbox)
+        primary_bar.addWidget(self.env_vars_btn)
+        primary_bar.addWidget(make_vseparator(primary_frame))
+        primary_bar.addWidget(self.run_selected_btn)
+        primary_bar.addWidget(self.stop_btn)
+        root.addWidget(primary_frame)
+
+        # Tier 2: Quick Run Modes + Live Summary
+        modes_row = QHBoxLayout()
+        modes_row.setSpacing(6)
 
         self.run_scenario_btn = QPushButton("Run Scenario", self)
         self.run_scenario_btn.clicked.connect(self._on_run_scenario)
@@ -118,27 +155,27 @@ class ExecutionWidget(QWidget):
         self.run_suite_btn.clicked.connect(self._on_run_complete_suite)
 
         self.rerun_failed_btn = QPushButton("Rerun Failed", self)
+        self.rerun_failed_btn.setIcon(make_icon("replay", TOKENS.text_primary, 13))
         self.rerun_failed_btn.clicked.connect(self._on_rerun_failed)
-
-        self.stop_btn = QPushButton("Stop", self)
-        self.stop_btn.setObjectName("dangerButton")
-        self.stop_btn.clicked.connect(self._on_stop)
-
-        toolbar.addWidget(self.session_label, stretch=1)
-        toolbar.addWidget(self.headed_checkbox)
-        toolbar.addWidget(self.env_vars_btn)
-        toolbar.addWidget(self.run_selected_btn)
-        toolbar.addWidget(self.run_scenario_btn)
-        toolbar.addWidget(self.run_independent_btn)
-        toolbar.addWidget(self.run_journey_btn)
-        toolbar.addWidget(self.run_suite_btn)
-        toolbar.addWidget(self.rerun_failed_btn)
-        toolbar.addWidget(self.stop_btn)
-        root.addLayout(toolbar)
 
         self.summary_label = QLabel("Idle — select tests and click Run.", self)
         self.summary_label.setObjectName("mutedLabel")
-        root.addWidget(self.summary_label)
+
+        modes_row.addWidget(self.run_scenario_btn)
+        modes_row.addWidget(self.run_independent_btn)
+        modes_row.addWidget(self.run_journey_btn)
+        modes_row.addWidget(self.run_suite_btn)
+        modes_row.addWidget(make_vseparator(self))
+        modes_row.addWidget(self.rerun_failed_btn)
+        modes_row.addSpacing(8)
+        modes_row.addWidget(self.summary_label, stretch=1)
+        root.addLayout(modes_row)
+
+        self._run_progress = QProgressBar(self)
+        self._run_progress.setRange(0, 0)
+        self._run_progress.setTextVisible(False)
+        self._run_progress.hide()
+        root.addWidget(self._run_progress)
 
         # Main splitter: Left (Tests + History) | Right (Results + Diagnostics)
         main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -148,50 +185,63 @@ class ExecutionWidget(QWidget):
         # Left-Top: Test Definitions checklist
         tests_panel = QWidget(self)
         tests_layout = QVBoxLayout(tests_panel)
-        tests_layout.setContentsMargins(0, 0, 0, 0)
-        tests_layout.setSpacing(4)
+        tests_layout.setContentsMargins(0, 0, 6, 4)
+        tests_layout.setSpacing(6)
 
         tests_header = QHBoxLayout()
         tests_title = QLabel("Tests in Session", tests_panel)
         tests_title.setObjectName("sectionTitle")
         self.refresh_btn = QPushButton("Refresh", tests_panel)
+        self.refresh_btn.setObjectName("ghostButton")
+        self.refresh_btn.setIcon(make_icon("refresh", TOKENS.text_secondary, 13))
         self.refresh_btn.clicked.connect(self.refresh)
         tests_header.addWidget(tests_title, stretch=1)
         tests_header.addWidget(self.refresh_btn)
 
         self.tests_list = QListWidget(tests_panel)
+        self.tests_list.setToolTip(
+            "Check tests to include in 'Run Selected'. "
+            "Highlight an independent test for 'Run Scenario'."
+        )
+        self.tests_list.itemChanged.connect(lambda _item: self._update_controls())
+        self.tests_list.currentItemChanged.connect(lambda _cur, _prev: self._update_controls())
         tests_layout.addLayout(tests_header)
         tests_layout.addWidget(self.tests_list, stretch=1)
 
         # Left-Bottom: Execution History
         history_panel = QWidget(self)
         history_layout = QVBoxLayout(history_panel)
-        history_layout.setContentsMargins(0, 0, 0, 0)
-        history_layout.setSpacing(4)
+        history_layout.setContentsMargins(0, 4, 6, 0)
+        history_layout.setSpacing(6)
 
         history_title = QLabel("Execution History", history_panel)
         history_title.setObjectName("sectionTitle")
         self.history_list = QListWidget(history_panel)
+        self.history_list.setToolTip(
+            "Click a past run to inspect its results, logs, screenshots, and traces."
+        )
         self.history_list.currentRowChanged.connect(self._on_history_selected)
         history_layout.addWidget(history_title)
         history_layout.addWidget(self.history_list, stretch=1)
 
         left_splitter.addWidget(tests_panel)
         left_splitter.addWidget(history_panel)
-        left_splitter.setSizes([240, 220])
+        left_splitter.setSizes([250, 230])
 
         # Right splitter: Results table (top) | Diagnostics tabs (bottom)
         right_splitter = QSplitter(Qt.Orientation.Vertical, self)
 
         results_panel = QWidget(self)
         results_layout = QVBoxLayout(results_panel)
-        results_layout.setContentsMargins(0, 0, 0, 0)
-        results_layout.setSpacing(4)
+        results_layout.setContentsMargins(6, 0, 0, 4)
+        results_layout.setSpacing(6)
 
         results_title = QLabel("Test Results", results_panel)
         results_title.setObjectName("sectionTitle")
         self.results_table = QTableWidget(0, 4, results_panel)
         self.results_table.setHorizontalHeaderLabels(["Status", "Test", "Duration", "Error"])
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setShowGrid(False)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.results_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -214,15 +264,22 @@ class ExecutionWidget(QWidget):
 
         # Diagnostics tabs
         self.detail_tabs = QTabWidget(self)
+        self.detail_tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.traceback_view = QPlainTextEdit(self)
         self.traceback_view.setReadOnly(True)
         self.traceback_view.setObjectName("codePreview")
+        self.traceback_view.setPlaceholderText(
+            "Select a test result to inspect tracebacks and output."
+        )
         self.detail_tabs.addTab(self.traceback_view, "Traceback & Output")
 
         self.errors_view = QPlainTextEdit(self)
         self.errors_view.setReadOnly(True)
         self.errors_view.setObjectName("codePreview")
+        self.errors_view.setPlaceholderText(
+            "Browser console and network errors appear here on failure."
+        )
         self.detail_tabs.addTab(self.errors_view, "Console & Network")
 
         self.screenshot_label = QLabel("No failure screenshot.", self)
@@ -232,18 +289,19 @@ class ExecutionWidget(QWidget):
 
         trace_panel = QWidget(self)
         trace_layout = QVBoxLayout(trace_panel)
-        trace_layout.setContentsMargins(12, 12, 12, 12)
-        trace_layout.setSpacing(8)
+        trace_layout.setContentsMargins(14, 14, 14, 14)
+        trace_layout.setSpacing(10)
         self.trace_status_label = QLabel("No Playwright trace for this test.", trace_panel)
         self.trace_status_label.setObjectName("mutedLabel")
         self.trace_status_label.setWordWrap(True)
         trace_btn_row = QHBoxLayout()
+        trace_btn_row.setSpacing(8)
         self.open_trace_btn = QPushButton("Open Playwright Trace", trace_panel)
         self.open_trace_btn.setObjectName("primaryButton")
-        self.open_trace_btn.setEnabled(False)
+        self.open_trace_btn.setIcon(make_icon("trace", TOKENS.accent_fg, 14))
         self.open_trace_btn.clicked.connect(self._on_open_trace)
         self.reveal_trace_btn = QPushButton("Open Trace Folder", trace_panel)
-        self.reveal_trace_btn.setEnabled(False)
+        self.reveal_trace_btn.setIcon(make_icon("folder", TOKENS.text_primary, 14))
         self.reveal_trace_btn.clicked.connect(self._on_reveal_trace)
         trace_btn_row.addWidget(self.open_trace_btn)
         trace_btn_row.addWidget(self.reveal_trace_btn)
@@ -256,6 +314,9 @@ class ExecutionWidget(QWidget):
         self.live_log_view = QPlainTextEdit(self)
         self.live_log_view.setReadOnly(True)
         self.live_log_view.setObjectName("codePreview")
+        self.live_log_view.setPlaceholderText(
+            "Live Pytest stdout/stderr streams here during execution."
+        )
         self.detail_tabs.addTab(self.live_log_view, "Live Run Log")
 
         right_splitter.addWidget(results_panel)
@@ -264,7 +325,7 @@ class ExecutionWidget(QWidget):
 
         main_splitter.addWidget(left_splitter)
         main_splitter.addWidget(right_splitter)
-        main_splitter.setSizes([300, 620])
+        main_splitter.setSizes([300, 650])
         root.addWidget(main_splitter, stretch=1)
 
     def load_session(self, session_id: str | None, session_name: str = "") -> None:
@@ -332,6 +393,7 @@ class ExecutionWidget(QWidget):
                     prior_checks[str(existing.data(Qt.ItemDataRole.UserRole))] = (
                         existing.checkState()
                     )
+        self.tests_list.blockSignals(True)
         self.tests_list.clear()
         for defn in self._definitions:
             tag = "journey" if defn.mode.value == "journey" else "indep"
@@ -340,7 +402,12 @@ class ExecutionWidget(QWidget):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             default_state = Qt.CheckState.Checked if defn.included else Qt.CheckState.Unchecked
             item.setCheckState(prior_checks.get(defn.id, default_state))
+            if defn.mode == TestMode.JOURNEY:
+                item.setForeground(status_color("journey"))
             self.tests_list.addItem(item)
+        if self.tests_list.count() > 0:
+            self.tests_list.setCurrentRow(0)
+        self.tests_list.blockSignals(False)
 
     def _populate_history_list(self, select_run_id: str | None = None) -> None:
         self.history_list.blockSignals(True)
@@ -354,6 +421,7 @@ class ExecutionWidget(QWidget):
             )
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, run.id)
+            item.setForeground(status_color(run.status.value))
             self.history_list.addItem(item)
             if select_run_id and run.id == select_run_id:
                 selected_row = idx
@@ -491,7 +559,12 @@ class ExecutionWidget(QWidget):
     def _on_stop(self) -> None:
         if self._worker is not None:
             self.summary_label.setText("Stopping test execution...")
-            self.stop_btn.setEnabled(False)
+            set_button_state(
+                self.stop_btn,
+                False,
+                enabled_tip="Stop the running test execution.",
+                disabled_tip="Stopping test execution...",
+            )
             self._worker.request_cancel()
 
     def _on_progress_event(self, event_obj: object) -> None:
@@ -608,7 +681,10 @@ class ExecutionWidget(QWidget):
         name_item.setData(Qt.ItemDataRole.UserRole, result.id)
         dur_str = f"{result.duration_ms} ms" if result.duration_ms else "-"
 
-        self.results_table.setItem(target_row, 0, QTableWidgetItem(result.status.value.upper()))
+        status_item = QTableWidgetItem(result.status.value.upper())
+        status_item.setForeground(status_color(result.status.value))
+
+        self.results_table.setItem(target_row, 0, status_item)
         self.results_table.setItem(target_row, 1, name_item)
         self.results_table.setItem(target_row, 2, QTableWidgetItem(dur_str))
         self.results_table.setItem(target_row, 3, QTableWidgetItem(result.error_message))
@@ -698,12 +774,32 @@ class ExecutionWidget(QWidget):
                 f"Playwright trace captured ({size_kb} KB): {trace_path.name}\n"
                 "Click 'Open Playwright Trace' to inspect DOM snapshots, network, and timeline."
             )
-            self.open_trace_btn.setEnabled(True)
-            self.reveal_trace_btn.setEnabled(True)
+            set_button_state(
+                self.open_trace_btn,
+                True,
+                enabled_tip="Launch the interactive Playwright Trace Viewer for this failure.",
+                disabled_tip="No Playwright trace captured for this test.",
+            )
+            set_button_state(
+                self.reveal_trace_btn,
+                True,
+                enabled_tip="Open the folder containing this trace .zip archive.",
+                disabled_tip="No Playwright trace captured for this test.",
+            )
         else:
             self.trace_status_label.setText("No Playwright trace for this test.")
-            self.open_trace_btn.setEnabled(False)
-            self.reveal_trace_btn.setEnabled(False)
+            set_button_state(
+                self.open_trace_btn,
+                False,
+                enabled_tip="Launch the interactive Playwright Trace Viewer.",
+                disabled_tip="Traces are captured automatically when a test fails.",
+            )
+            set_button_state(
+                self.reveal_trace_btn,
+                False,
+                enabled_tip="Open the trace archive folder.",
+                disabled_tip="Traces are captured automatically when a test fails.",
+            )
 
     def _on_open_trace(self) -> None:
         if self._selected_trace_path is None or not self._selected_trace_path.is_file():
@@ -738,27 +834,111 @@ class ExecutionWidget(QWidget):
         self.screenshot_label.setText("No failure screenshot.")
         self._selected_trace_path = None
         self.trace_status_label.setText("No Playwright trace for this test.")
-        self.open_trace_btn.setEnabled(False)
-        self.reveal_trace_btn.setEnabled(False)
+        set_button_state(
+            self.open_trace_btn,
+            False,
+            enabled_tip="Launch the interactive Playwright Trace Viewer.",
+            disabled_tip="Select a failed test result with a trace to inspect it.",
+        )
+        set_button_state(
+            self.reveal_trace_btn,
+            False,
+            enabled_tip="Open the trace archive folder.",
+            disabled_tip="Select a failed test result with a trace first.",
+        )
 
     def _update_controls(self) -> None:
         running = self._worker is not None
         locked = running or self._external_busy
+        busy_tip = (
+            "Wait for the current test run to finish."
+            if running
+            else "Wait for the active background task to finish."
+        )
         has_session = self._session_id is not None
         has_defs = bool(self._definitions)
+        checked_ids = self._selected_definition_ids()
+        has_independent = any(d.mode == TestMode.INDEPENDENT for d in self._definitions)
+        has_journey = any(d.mode == TestMode.JOURNEY for d in self._definitions)
+        has_scenario_defs = any(d.scenario_id is not None for d in self._definitions)
         can_rerun = (
             not locked and self._current_run is not None and self._current_run.failed_count > 0
         )
 
-        self.run_selected_btn.setEnabled(has_session and has_defs and not locked)
-        self.run_scenario_btn.setEnabled(
-            has_session and any(d.scenario_id is not None for d in self._definitions) and not locked
+        self._run_progress.setVisible(running)
+
+        set_button_state(
+            self.run_selected_btn,
+            has_session and bool(checked_ids) and not locked,
+            enabled_tip=f"Run {len(checked_ids)} checked test(s) with Pytest + Playwright.",
+            disabled_tip=(
+                busy_tip
+                if locked
+                else (
+                    "Check at least one test in 'Tests in Session' to run."
+                    if has_defs
+                    else "Generate test definitions in 'Test Definitions & Code' first."
+                )
+            ),
         )
-        self.run_independent_btn.setEnabled(has_session and has_defs and not locked)
-        self.run_journey_btn.setEnabled(has_session and has_defs and not locked)
-        self.run_suite_btn.setEnabled(has_session and has_defs and not locked)
-        self.rerun_failed_btn.setEnabled(can_rerun)
-        self.stop_btn.setEnabled(running)
-        self.refresh_btn.setEnabled(has_session and not locked)
+        set_button_state(
+            self.run_scenario_btn,
+            has_session and has_scenario_defs and not locked,
+            enabled_tip="Run all tests belonging to the highlighted scenario.",
+            disabled_tip=(busy_tip if locked else "Generate an independent scenario test first."),
+        )
+        set_button_state(
+            self.run_independent_btn,
+            has_session and has_independent and not locked,
+            enabled_tip="Run all independent scenario tests in isolated browser contexts.",
+            disabled_tip=(
+                busy_tip if locked else "No independent test definitions in this session."
+            ),
+        )
+        set_button_state(
+            self.run_journey_btn,
+            has_session and has_journey and not locked,
+            enabled_tip="Run the end-to-end journey test in a shared browser context.",
+            disabled_tip=(
+                busy_tip
+                if locked
+                else "No journey test found. Enable 'Include Journey Test' when generating."
+            ),
+        )
+        set_button_state(
+            self.run_suite_btn,
+            has_session and has_defs and not locked,
+            enabled_tip="Run every included test definition in this session.",
+            disabled_tip=busy_tip if locked else "Generate test definitions first.",
+        )
+        set_button_state(
+            self.rerun_failed_btn,
+            can_rerun,
+            enabled_tip="Re-execute only the failed tests from the currently loaded run.",
+            disabled_tip=(
+                busy_tip
+                if locked
+                else "Available after a run completes with at least one failed test."
+            ),
+        )
+        set_button_state(
+            self.stop_btn,
+            running,
+            enabled_tip="Cancel the active Pytest run.",
+            disabled_tip="No test run is currently active.",
+        )
+        set_button_state(
+            self.refresh_btn,
+            has_session and not locked,
+            enabled_tip="Reload test definitions and execution history from storage.",
+            disabled_tip=busy_tip if locked else "Select a recording session first.",
+        )
         self.headed_checkbox.setEnabled(not locked)
-        self.env_vars_btn.setEnabled(not locked)
+        set_button_state(
+            self.env_vars_btn,
+            not locked,
+            enabled_tip=(
+                "Configure temporary environment variables / redacted test secrets for this run."
+            ),
+            disabled_tip=busy_tip,
+        )

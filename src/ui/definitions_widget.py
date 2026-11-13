@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -45,6 +46,13 @@ from src.definitions import (
 )
 from src.export import CopyExportService
 from src.processing import ProcessedActionType
+from src.ui.theme import (
+    TOKENS,
+    make_icon,
+    make_vseparator,
+    set_button_state,
+    status_color,
+)
 
 
 class DefinitionsWidget(QWidget):
@@ -71,21 +79,31 @@ class DefinitionsWidget(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        # Top toolbar
-        toolbar = QHBoxLayout()
+        # Top toolbar card
+        toolbar_frame = QFrame(self)
+        toolbar_frame.setObjectName("toolbarStrip")
+        toolbar = QHBoxLayout(toolbar_frame)
+        toolbar.setContentsMargins(12, 8, 12, 8)
+        toolbar.setSpacing(10)
+
         self.summary_label = QLabel(
-            "Select a processed session to generate and edit test definitions.", self
+            "Select a processed session to generate and edit test definitions.", toolbar_frame
         )
         self.summary_label.setObjectName("mutedLabel")
 
-        self.include_journey_checkbox = QCheckBox("Include Journey Test", self)
+        self.include_journey_checkbox = QCheckBox("Include Journey Test", toolbar_frame)
         self.include_journey_checkbox.setChecked(True)
+        self.include_journey_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.include_journey_checkbox.setToolTip(
+            "Also generate a combined end-to-end journey test across all included scenarios."
+        )
 
-        self.generate_btn = QPushButton("Generate from Scenarios", self)
+        self.generate_btn = QPushButton("Generate from Scenarios", toolbar_frame)
         self.generate_btn.setObjectName("primaryButton")
+        self.generate_btn.setIcon(make_icon("spark", TOKENS.accent_fg, 14))
         self.generate_btn.clicked.connect(self.generate_for_current_session)
 
         toolbar.addWidget(self.summary_label, stretch=1)
@@ -106,42 +124,58 @@ class DefinitionsWidget(QWidget):
 
         self.definitions_list = QListWidget(left_pane)
         self.definitions_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.definitions_list.setToolTip(
+            "Select a test to edit its steps and assertions, "
+            "or multi-select to preview combined code."
+        )
         self.definitions_list.itemSelectionChanged.connect(self._on_definition_selection_changed)
 
-        def_btns = QHBoxLayout()
+        def_btns_row1 = QHBoxLayout()
+        def_btns_row1.setSpacing(6)
         self.rename_def_btn = QPushButton("Rename", left_pane)
+        self.rename_def_btn.setIcon(make_icon("edit", TOKENS.text_primary, 13))
         self.rename_def_btn.clicked.connect(self._on_rename_definition)
         self.edit_details_btn = QPushButton("Settings", left_pane)
+        self.edit_details_btn.setIcon(make_icon("sliders", TOKENS.text_primary, 13))
         self.edit_details_btn.clicked.connect(self._on_edit_definition_settings)
+        def_btns_row1.addWidget(self.rename_def_btn)
+        def_btns_row1.addWidget(self.edit_details_btn)
+
+        def_btns_row2 = QHBoxLayout()
+        def_btns_row2.setSpacing(6)
         self.toggle_def_btn = QPushButton("Exclude", left_pane)
         self.toggle_def_btn.clicked.connect(self._on_toggle_definition_included)
         self.delete_def_btn = QPushButton("Delete", left_pane)
+        self.delete_def_btn.setObjectName("subtleDangerButton")
+        self.delete_def_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 13))
         self.delete_def_btn.clicked.connect(self._on_delete_definition)
-        def_btns.addWidget(self.rename_def_btn)
-        def_btns.addWidget(self.edit_details_btn)
-        def_btns.addWidget(self.toggle_def_btn)
-        def_btns.addWidget(self.delete_def_btn)
+        def_btns_row2.addWidget(self.toggle_def_btn)
+        def_btns_row2.addWidget(self.delete_def_btn)
 
         left_layout.addWidget(left_title)
         left_layout.addWidget(self.definitions_list, stretch=1)
-        left_layout.addLayout(def_btns)
+        left_layout.addLayout(def_btns_row1)
+        left_layout.addLayout(def_btns_row2)
 
         # Right vertical splitter: Actions/Assertions editor (top) + Generated Code (bottom)
         right_splitter = QSplitter(Qt.Orientation.Vertical, splitter)
 
         # Editor tabs
         self.editor_tabs = QTabWidget(right_splitter)
+        self.editor_tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
 
         # Actions tab
         actions_tab = QWidget(self.editor_tabs)
         actions_layout = QVBoxLayout(actions_tab)
-        actions_layout.setContentsMargins(6, 6, 6, 6)
-        actions_layout.setSpacing(6)
+        actions_layout.setContentsMargins(8, 8, 8, 8)
+        actions_layout.setSpacing(8)
 
         self.actions_table = QTableWidget(0, 5, actions_tab)
         self.actions_table.setHorizontalHeaderLabels(
             ["#", "Action", "Selector", "Value / URL", "Evidence"]
         )
+        self.actions_table.setAlternatingRowColors(True)
+        self.actions_table.setShowGrid(False)
         self.actions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.actions_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.actions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -164,22 +198,29 @@ class DefinitionsWidget(QWidget):
         self.actions_table.itemSelectionChanged.connect(self._update_controls)
 
         action_btns = QHBoxLayout()
+        action_btns.setSpacing(6)
         self.edit_selector_btn = QPushButton("Edit Selector", actions_tab)
+        self.edit_selector_btn.setIcon(make_icon("edit", TOKENS.text_primary, 13))
         self.edit_selector_btn.clicked.connect(self._on_edit_action_selector)
         self.edit_value_btn = QPushButton("Edit Value/URL", actions_tab)
         self.edit_value_btn.clicked.connect(self._on_edit_action_value)
         self.move_action_up_btn = QPushButton("Up", actions_tab)
+        self.move_action_up_btn.setIcon(make_icon("up", TOKENS.text_primary, 13))
         self.move_action_up_btn.clicked.connect(lambda: self._on_move_action(-1))
         self.move_action_down_btn = QPushButton("Down", actions_tab)
+        self.move_action_down_btn.setIcon(make_icon("down", TOKENS.text_primary, 13))
         self.move_action_down_btn.clicked.connect(lambda: self._on_move_action(1))
         self.delete_action_btn = QPushButton("Delete Step", actions_tab)
+        self.delete_action_btn.setObjectName("subtleDangerButton")
+        self.delete_action_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 13))
         self.delete_action_btn.clicked.connect(self._on_delete_action)
         action_btns.addWidget(self.edit_selector_btn)
         action_btns.addWidget(self.edit_value_btn)
+        action_btns.addWidget(make_vseparator(actions_tab))
         action_btns.addWidget(self.move_action_up_btn)
         action_btns.addWidget(self.move_action_down_btn)
-        action_btns.addWidget(self.delete_action_btn)
         action_btns.addStretch(1)
+        action_btns.addWidget(self.delete_action_btn)
 
         actions_layout.addWidget(self.actions_table, stretch=1)
         actions_layout.addLayout(action_btns)
@@ -188,13 +229,15 @@ class DefinitionsWidget(QWidget):
         # Assertions tab
         assertions_tab = QWidget(self.editor_tabs)
         assertions_layout = QVBoxLayout(assertions_tab)
-        assertions_layout.setContentsMargins(6, 6, 6, 6)
-        assertions_layout.setSpacing(6)
+        assertions_layout.setContentsMargins(8, 8, 8, 8)
+        assertions_layout.setSpacing(8)
 
         self.assertions_table = QTableWidget(0, 5, assertions_tab)
         self.assertions_table.setHorizontalHeaderLabels(
             ["On", "Confidence", "Type", "Description / Expected", "Review"]
         )
+        self.assertions_table.setAlternatingRowColors(True)
+        self.assertions_table.setShowGrid(False)
         self.assertions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.assertions_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.assertions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -217,19 +260,25 @@ class DefinitionsWidget(QWidget):
         self.assertions_table.itemSelectionChanged.connect(self._update_controls)
 
         assertion_btns = QHBoxLayout()
+        assertion_btns.setSpacing(6)
+        self.add_assertion_btn = QPushButton("Add Assertion", assertions_tab)
+        self.add_assertion_btn.setObjectName("primaryButton")
+        self.add_assertion_btn.setIcon(make_icon("plus", TOKENS.accent_fg, 13))
+        self.add_assertion_btn.clicked.connect(self._on_add_assertion)
         self.toggle_assertion_btn = QPushButton("Toggle On/Off", assertions_tab)
         self.toggle_assertion_btn.clicked.connect(self._on_toggle_assertion)
-        self.add_assertion_btn = QPushButton("+ Add Assertion", assertions_tab)
-        self.add_assertion_btn.clicked.connect(self._on_add_assertion)
         self.edit_assertion_btn = QPushButton("Edit Expected", assertions_tab)
+        self.edit_assertion_btn.setIcon(make_icon("edit", TOKENS.text_primary, 13))
         self.edit_assertion_btn.clicked.connect(self._on_edit_assertion)
         self.delete_assertion_btn = QPushButton("Delete Assertion", assertions_tab)
+        self.delete_assertion_btn.setObjectName("subtleDangerButton")
+        self.delete_assertion_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 13))
         self.delete_assertion_btn.clicked.connect(self._on_delete_assertion)
-        assertion_btns.addWidget(self.toggle_assertion_btn)
         assertion_btns.addWidget(self.add_assertion_btn)
+        assertion_btns.addWidget(self.toggle_assertion_btn)
         assertion_btns.addWidget(self.edit_assertion_btn)
-        assertion_btns.addWidget(self.delete_assertion_btn)
         assertion_btns.addStretch(1)
+        assertion_btns.addWidget(self.delete_assertion_btn)
 
         assertions_layout.addWidget(self.assertions_table, stretch=1)
         assertions_layout.addLayout(assertion_btns)
@@ -238,21 +287,22 @@ class DefinitionsWidget(QWidget):
         # Bottom pane: Generated Pytest + Playwright Code Preview & Copy Bar
         code_pane = QWidget(right_splitter)
         code_layout = QVBoxLayout(code_pane)
-        code_layout.setContentsMargins(6, 4, 0, 0)
+        code_layout.setContentsMargins(6, 6, 0, 0)
         code_layout.setSpacing(6)
 
         code_header = QHBoxLayout()
         code_title = QLabel("Generated Pytest + Playwright Code", code_pane)
         code_title.setObjectName("sectionTitle")
         self.copy_status_label = QLabel("", code_pane)
-        self.copy_status_label.setObjectName("mutedLabel")
+        self.copy_status_label.setObjectName("successInline")
         code_header.addWidget(code_title)
         code_header.addStretch(1)
         code_header.addWidget(self.copy_status_label)
 
         self.code_preview = QPlainTextEdit(code_pane)
+        self.code_preview.setObjectName("codePreview")
         self.code_preview.setReadOnly(True)
-        mono = QFont("Consolas", 10)
+        mono = QFont("Cascadia Code", 10)
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.code_preview.setFont(mono)
         self.code_preview.setPlaceholderText(
@@ -260,7 +310,9 @@ class DefinitionsWidget(QWidget):
         )
 
         copy_bar = QHBoxLayout()
+        copy_bar.setSpacing(6)
         self.copy_test_btn = QPushButton("Copy Test", code_pane)
+        self.copy_test_btn.setIcon(make_icon("copy", TOKENS.text_primary, 13))
         self.copy_test_btn.clicked.connect(self._on_copy_single_test)
         self.copy_scenario_btn = QPushButton("Copy Scenario", code_pane)
         self.copy_scenario_btn.clicked.connect(self._on_copy_scenario)
@@ -271,6 +323,8 @@ class DefinitionsWidget(QWidget):
         self.copy_fixtures_btn = QPushButton("Copy Fixtures & Config", code_pane)
         self.copy_fixtures_btn.clicked.connect(self._on_copy_fixtures)
         self.export_suite_btn = QPushButton("Export Suite...", code_pane)
+        self.export_suite_btn.setObjectName("primaryButton")
+        self.export_suite_btn.setIcon(make_icon("folder", TOKENS.accent_fg, 13))
         self.export_suite_btn.clicked.connect(self._on_export_suite)
 
         copy_bar.addWidget(self.copy_test_btn)
@@ -278,8 +332,8 @@ class DefinitionsWidget(QWidget):
         copy_bar.addWidget(self.copy_selected_btn)
         copy_bar.addWidget(self.copy_all_btn)
         copy_bar.addWidget(self.copy_fixtures_btn)
-        copy_bar.addWidget(self.export_suite_btn)
         copy_bar.addStretch(1)
+        copy_bar.addWidget(self.export_suite_btn)
 
         code_layout.addLayout(code_header)
         code_layout.addWidget(self.code_preview, stretch=1)
@@ -292,9 +346,9 @@ class DefinitionsWidget(QWidget):
         splitter.addWidget(right_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([280, 620])
+        splitter.setSizes([290, 660])
 
-        layout.addLayout(toolbar)
+        layout.addWidget(toolbar_frame)
         layout.addWidget(splitter, stretch=1)
 
     def load_session(
@@ -398,6 +452,14 @@ class DefinitionsWidget(QWidget):
             )
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, defn.id)
+            if not defn.included:
+                item.setForeground(QColor(TOKENS.text_muted))
+            elif defn.mode.value == "journey":
+                item.setForeground(QColor(TOKENS.info_fg))
+            item.setToolTip(
+                f"{defn.name} ({mode_tag})\n"
+                f"{len(defn.actions)} step(s), {len(defn.assertions)} assertion(s)"
+            )
             self.definitions_list.addItem(item)
 
         if 0 <= select_index < self.definitions_list.count():
@@ -449,10 +511,17 @@ class DefinitionsWidget(QWidget):
                 val_text = f"key={action.key}"
             else:
                 val_text = action.value or "-"
+
+            action_item = QTableWidgetItem(action.action_type.value)
+            action_item.setForeground(QColor(TOKENS.accent_hover))
+            val_item = QTableWidgetItem(val_text)
+            if action.is_redacted:
+                val_item.setForeground(QColor(TOKENS.warning_fg))
+
             self.actions_table.setItem(row_idx, 0, QTableWidgetItem(str(action.order_index)))
-            self.actions_table.setItem(row_idx, 1, QTableWidgetItem(action.action_type.value))
+            self.actions_table.setItem(row_idx, 1, action_item)
             self.actions_table.setItem(row_idx, 2, QTableWidgetItem(selector_text))
-            self.actions_table.setItem(row_idx, 3, QTableWidgetItem(val_text))
+            self.actions_table.setItem(row_idx, 3, val_item)
             self.actions_table.setItem(
                 row_idx, 4, QTableWidgetItem(f"{len(action.raw_event_ids)} raw")
             )
@@ -465,13 +534,19 @@ class DefinitionsWidget(QWidget):
             detail = assertion.description
             if assertion.expected and assertion.expected not in detail:
                 detail = f"{detail} ({assertion.expected})"
-            self.assertions_table.setItem(row_idx, 0, QTableWidgetItem(on_text))
+
+            on_item = QTableWidgetItem(on_text)
+            on_item.setForeground(status_color(on_text))
+            review_item = QTableWidgetItem(review_text)
+            review_item.setForeground(status_color(review_text))
+
+            self.assertions_table.setItem(row_idx, 0, on_item)
             self.assertions_table.setItem(row_idx, 1, QTableWidgetItem(assertion.confidence.value))
             self.assertions_table.setItem(
                 row_idx, 2, QTableWidgetItem(assertion.assertion_type.value)
             )
             self.assertions_table.setItem(row_idx, 3, QTableWidgetItem(detail))
-            self.assertions_table.setItem(row_idx, 4, QTableWidgetItem(review_text))
+            self.assertions_table.setItem(row_idx, 4, review_item)
 
     # --- Definition editing handlers ---
 
@@ -495,14 +570,21 @@ class DefinitionsWidget(QWidget):
             return
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Test Settings — {defn.name}")
+        dialog.setWindowIcon(make_icon("brand", size=24))
+        dialog.setMinimumWidth(460)
         form = QFormLayout(dialog)
+        form.setContentsMargins(18, 18, 18, 16)
+        form.setSpacing(10)
 
         desc_input = QLineEdit(defn.description, dialog)
+        desc_input.setPlaceholderText("Optional docstring/description for this test")
         base_url_input = QLineEdit(defn.settings.base_url, dialog)
+        base_url_input.setPlaceholderText("https://example.com")
         timeout_spin = QSpinBox(dialog)
         timeout_spin.setRange(1000, 300000)
         timeout_spin.setSingleStep(1000)
         timeout_spin.setValue(defn.settings.timeout_ms)
+        timeout_spin.setToolTip("Playwright action/assertion timeout in milliseconds.")
         width_spin = QSpinBox(dialog)
         width_spin.setRange(320, 3840)
         width_spin.setValue(defn.settings.viewport_width)
@@ -517,6 +599,7 @@ class DefinitionsWidget(QWidget):
             else "(None)"
         )
         prereq_label = QLabel(prereq_text, dialog)
+        prereq_label.setObjectName("mutedLabel")
         prereq_label.setWordWrap(True)
 
         form.addRow("Description:", desc_input)
@@ -531,6 +614,10 @@ class DefinitionsWidget(QWidget):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             dialog,
         )
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("Save Settings")
+            ok_btn.setObjectName("primaryButton")
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
@@ -977,16 +1064,51 @@ class DefinitionsWidget(QWidget):
     def _update_controls(self) -> None:
         has_session = self._session_id is not None
         busy = getattr(self, "_external_busy", False)
+        busy_tip = "Wait for the active background task to finish."
         selected = self._selected_definitions()
         single = len(selected) == 1
         defn = selected[0] if single else None
+        has_included = any(d.included for d in self._definitions)
 
-        self.generate_btn.setEnabled(has_session and not busy)
+        set_button_state(
+            self.generate_btn,
+            has_session and not busy,
+            enabled_tip=(
+                "Generate editable Playwright + Pytest definitions "
+                "from this session's included scenarios."
+            ),
+            disabled_tip=busy_tip if busy else "Select a recording session first.",
+        )
         self.include_journey_checkbox.setEnabled(has_session and not busy)
-        self.rename_def_btn.setEnabled(single and not busy)
-        self.edit_details_btn.setEnabled(single and not busy)
-        self.toggle_def_btn.setEnabled(single and not busy)
-        self.delete_def_btn.setEnabled(single and not busy)
+
+        set_button_state(
+            self.rename_def_btn,
+            single and not busy,
+            enabled_tip="Rename the selected test definition.",
+            disabled_tip=busy_tip if busy else "Select a single test definition to rename.",
+        )
+        set_button_state(
+            self.edit_details_btn,
+            single and not busy,
+            enabled_tip=(
+                "Configure timeout, viewport size, headless default, and base URL for this test."
+            ),
+            disabled_tip=busy_tip if busy else "Select a single test definition to edit settings.",
+        )
+        set_button_state(
+            self.toggle_def_btn,
+            single and not busy,
+            enabled_tip="Include or exclude this test from full suite copy and export.",
+            disabled_tip=busy_tip
+            if busy
+            else "Select a single test definition to toggle inclusion.",
+        )
+        set_button_state(
+            self.delete_def_btn,
+            single and not busy,
+            enabled_tip="Permanently delete the selected test definition.",
+            disabled_tip=busy_tip if busy else "Select a single test definition to delete.",
+        )
         if defn is not None:
             self.toggle_def_btn.setText("Exclude" if defn.included else "Include")
         else:
@@ -994,24 +1116,119 @@ class DefinitionsWidget(QWidget):
 
         action_row = self.actions_table.currentRow()
         has_action = defn is not None and 0 <= action_row < len(defn.actions)
-        self.edit_selector_btn.setEnabled(has_action and not busy)
-        self.edit_value_btn.setEnabled(has_action and not busy)
-        self.move_action_up_btn.setEnabled(has_action and action_row > 0 and not busy)
-        self.move_action_down_btn.setEnabled(
-            has_action and defn is not None and action_row < len(defn.actions) - 1 and not busy
+        current_action = defn.actions[action_row] if (has_action and defn is not None) else None
+        is_nav_action = current_action is not None and current_action.action_type in (
+            ProcessedActionType.NAVIGATE,
+            ProcessedActionType.OPEN_TAB,
         )
-        self.delete_action_btn.setEnabled(has_action and not busy)
+
+        set_button_state(
+            self.edit_selector_btn,
+            has_action and not is_nav_action and not busy,
+            enabled_tip="Edit the Playwright locator/selector for the selected step.",
+            disabled_tip=(
+                busy_tip
+                if busy
+                else (
+                    "Navigation steps use a URL rather than an element selector."
+                    if is_nav_action
+                    else "Select a step in the Actions table to edit its selector."
+                )
+            ),
+        )
+        set_button_state(
+            self.edit_value_btn,
+            has_action and not busy,
+            enabled_tip="Edit the input value, URL, key, or check state for the selected step.",
+            disabled_tip=busy_tip if busy else "Select a step in the Actions table to edit.",
+        )
+        set_button_state(
+            self.move_action_up_btn,
+            has_action and action_row > 0 and not busy,
+            enabled_tip="Move this step earlier in the test.",
+            disabled_tip=(
+                busy_tip
+                if busy
+                else ("Already at the first step." if has_action else "Select a step to reorder.")
+            ),
+        )
+        set_button_state(
+            self.move_action_down_btn,
+            has_action and defn is not None and action_row < len(defn.actions) - 1 and not busy,
+            enabled_tip="Move this step later in the test.",
+            disabled_tip=(
+                busy_tip
+                if busy
+                else ("Already at the last step." if has_action else "Select a step to reorder.")
+            ),
+        )
+        set_button_state(
+            self.delete_action_btn,
+            has_action and not busy,
+            enabled_tip="Delete the selected step from this test definition.",
+            disabled_tip=busy_tip if busy else "Select a step to delete.",
+        )
 
         assertion_row = self.assertions_table.currentRow()
         has_assertion = defn is not None and 0 <= assertion_row < len(defn.assertions)
-        self.add_assertion_btn.setEnabled(single and not busy)
-        self.toggle_assertion_btn.setEnabled(has_assertion and not busy)
-        self.edit_assertion_btn.setEnabled(has_assertion and not busy)
-        self.delete_assertion_btn.setEnabled(has_assertion and not busy)
+        set_button_state(
+            self.add_assertion_btn,
+            single and not busy,
+            enabled_tip="Add a custom Playwright assertion to this test.",
+            disabled_tip=busy_tip if busy else "Select a single test definition to add assertions.",
+        )
+        set_button_state(
+            self.toggle_assertion_btn,
+            has_assertion and not busy,
+            enabled_tip="Enable or disable the selected assertion in generated code.",
+            disabled_tip=busy_tip if busy else "Select an assertion row first.",
+        )
+        set_button_state(
+            self.edit_assertion_btn,
+            has_assertion and not busy,
+            enabled_tip="Edit the expected value or selector for the selected assertion.",
+            disabled_tip=busy_tip if busy else "Select an assertion row to edit.",
+        )
+        set_button_state(
+            self.delete_assertion_btn,
+            has_assertion and not busy,
+            enabled_tip="Remove the selected assertion from this test.",
+            disabled_tip=busy_tip if busy else "Select an assertion row to delete.",
+        )
 
-        self.copy_test_btn.setEnabled(single)
-        self.copy_scenario_btn.setEnabled(defn is not None and defn.scenario_id is not None)
-        self.copy_selected_btn.setEnabled(bool(selected))
-        self.copy_all_btn.setEnabled(any(d.included for d in self._definitions))
-        self.copy_fixtures_btn.setEnabled(bool(self._definitions))
-        self.export_suite_btn.setEnabled(any(d.included for d in self._definitions))
+        set_button_state(
+            self.copy_test_btn,
+            single,
+            enabled_tip="Copy the selected standalone Pytest function to the clipboard.",
+            disabled_tip="Select a single test definition to copy.",
+        )
+        set_button_state(
+            self.copy_scenario_btn,
+            defn is not None and defn.scenario_id is not None,
+            enabled_tip="Copy all tests belonging to this scenario.",
+            disabled_tip="Select an independent scenario-backed test to copy its scenario.",
+        )
+        set_button_state(
+            self.copy_selected_btn,
+            bool(selected),
+            enabled_tip="Copy all currently highlighted test definitions to the clipboard.",
+            disabled_tip="Select one or more test definitions to copy.",
+        )
+        set_button_state(
+            self.copy_all_btn,
+            has_included,
+            enabled_tip="Copy all included test definitions in this session.",
+            disabled_tip="Generate and include at least one test definition first.",
+        )
+        set_button_state(
+            self.copy_fixtures_btn,
+            bool(self._definitions),
+            enabled_tip="Copy standalone conftest.py fixtures and pytest.ini configuration.",
+            disabled_tip="Generate test definitions first to copy fixtures.",
+        )
+        set_button_state(
+            self.export_suite_btn,
+            has_included,
+            enabled_tip="Export a complete standalone Python + Playwright + Pytest suite folder.",
+            disabled_tip="Generate and include at least one test definition to export.",
+        )

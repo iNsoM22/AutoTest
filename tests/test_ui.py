@@ -259,3 +259,92 @@ def test_project_switching_clears_tabs_and_session_reloads_pages(
     window._on_execution_state_changed()
     assert window.sessions_table.currentRow() == 0
     assert window.start_url_input.text() == "https://beta.example.com/custom-path"
+
+
+@pytest.mark.ui
+def test_ui_ux_validation_tooltips_and_conditional_disabling(
+    qtbot: QtBot,
+    app_context: AppContext,
+) -> None:
+    from PySide6.QtCore import Qt
+
+    from src.ui import ProjectDialog
+
+    # ProjectDialog disables OK until name is filled and URL (if provided) is valid
+    dlg = ProjectDialog()
+    qtbot.addWidget(dlg)
+    assert dlg._ok_btn is not None
+    assert not dlg._ok_btn.isEnabled()
+    assert "project name" in dlg._ok_btn.toolTip().lower()
+
+    dlg._name_input.setText("Storefront")
+    assert dlg._ok_btn.isEnabled()
+
+    dlg._base_url_input.setText("not-a-valid-url")
+    assert not dlg._ok_btn.isEnabled()
+    assert "http://" in dlg._ok_btn.toolTip()
+
+    dlg._base_url_input.setText("https://store.example.com")
+    assert dlg._ok_btn.isEnabled()
+
+    # MainWindow with zero projects disables project/recording actions with clear tooltips
+    window = MainWindow(
+        app_context.settings,
+        app_context.project_service,
+        app_context.session_service,
+        app_context.event_repository,
+        scenario_service=app_context.scenario_service,
+        definition_service=app_context.definition_service,
+        copy_service=app_context.copy_service,
+        execution_service=app_context.execution_service,
+        browser_manager_factory=_FakeBrowserManager,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    assert not window.record_toggle_btn.isEnabled()
+    assert "project" in window.record_toggle_btn.toolTip().lower()
+    assert not window.edit_project_btn.isEnabled()
+    assert not window.delete_project_btn.isEnabled()
+
+    # Create project + session -> unchecking all tests in ExecutionWidget disables Run Selected
+    project = app_context.project_service.create_project(
+        ProjectCreate(name="Storefront", base_url="https://store.example.com")
+    )
+    session = app_context.session_service.create_session(project.id, name="Smoke")
+    app_context.session_service.register_page(
+        session.id, page_id="p1", tab_index=0, url="https://store.example.com", title="Store"
+    )
+    window._refresh_projects(select_project_id=project.id)
+    assert window.record_toggle_btn.isEnabled()
+    assert window.execution_widget is not None
+    assert not window.execution_widget.run_selected_btn.isEnabled()
+    assert "generate" in window.execution_widget.run_selected_btn.toolTip().lower()
+
+    # After generating definitions, unchecking all disables Run Selected with helpful tooltip
+    assert window.review_widget is not None
+    assert window.definitions_widget is not None
+    from src.recording.models import EventSource, EventType, RawEvent
+
+    app_context.event_repository.insert_batch(
+        [
+            RawEvent(
+                project_id=project.id,
+                session_id=session.id,
+                sequence_no=1,
+                page_id="p1",
+                source=EventSource.PLAYWRIGHT,
+                event_type=EventType.NAVIGATION,
+                payload={"url": "https://store.example.com"},
+            )
+        ]
+    )
+    window.review_widget.process_current_session()
+    qtbot.waitUntil(lambda: not window.review_widget.is_processing, timeout=5000)
+    window.definitions_widget.generate_for_current_session()
+    assert window.execution_widget.run_selected_btn.isEnabled()
+    for i in range(window.execution_widget.tests_list.count()):
+        item = window.execution_widget.tests_list.item(i)
+        if item is not None:
+            item.setCheckState(Qt.CheckState.Unchecked)
+    assert not window.execution_widget.run_selected_btn.isEnabled()
+    assert "check at least one" in window.execution_widget.run_selected_btn.toolTip().lower()
