@@ -54,6 +54,7 @@ from src.ui.execution_widget import ExecutionWidget
 from src.ui.review_widget import ReviewWidget
 from src.ui.theme import (
     TOKENS,
+    humanize_label,
     make_hseparator,
     make_icon,
     set_button_state,
@@ -107,11 +108,12 @@ class MainWindow(QMainWindow):
         self._projects: dict[str, Project] = {}
         self._selected_project_id: str | None = None
         self._loaded_project_id: str | None = None
+        self._bound_session_id: str | None = None
         self._active_session_id: str | None = None
         self._active_worker: BrowserSessionWorker | None = None
         self._tracked_pages: dict[str, PageInfo] = {}
         self._event_count: int = 0
-        self._step_pills: list[tuple[QPushButton, list[int]]] = []
+        self._step_pills: list[tuple[QPushButton, list[int], str]] = []
 
         self.setWindowTitle(f"AutoTest v{__version__}")
         self.setWindowIcon(make_icon("brand", size=24))
@@ -143,7 +145,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_workspace())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([268, 992])
+        splitter.setSizes([276, 984])
 
         self.setCentralWidget(splitter)
 
@@ -155,10 +157,10 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         panel = QWidget(self)
         panel.setObjectName("sidebarPanel")
-        panel.setMinimumWidth(236)
+        panel.setMinimumWidth(256)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(14, 16, 14, 14)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         # Brand identity header
         brand_row = QHBoxLayout()
@@ -194,19 +196,19 @@ class MainWindow(QMainWindow):
         self.project_list.currentItemChanged.connect(self._on_project_selection_changed)
 
         self.sidebar_empty_hint = QLabel(
-            "No projects yet. Click New to create your first test workspace.",
+            "No projects yet. Click New Project to create your first workspace.",
             panel,
         )
         self.sidebar_empty_hint.setObjectName("hintBanner")
         self.sidebar_empty_hint.setWordWrap(True)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        self.new_project_btn = QPushButton("New", panel)
+        self.new_project_btn = QPushButton("New Project", panel)
         self.new_project_btn.setObjectName("primaryButton")
         self.new_project_btn.setIcon(make_icon("plus", TOKENS.accent_fg, 14))
         self.new_project_btn.clicked.connect(self._on_new_project)
 
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self.edit_project_btn = QPushButton("Edit", panel)
         self.edit_project_btn.setIcon(make_icon("edit", TOKENS.text_primary, 14))
         self.edit_project_btn.clicked.connect(self._on_edit_project)
@@ -216,13 +218,13 @@ class MainWindow(QMainWindow):
         self.delete_project_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 14))
         self.delete_project_btn.clicked.connect(self._on_delete_project)
 
-        btn_row.addWidget(self.new_project_btn)
-        btn_row.addWidget(self.edit_project_btn)
-        btn_row.addWidget(self.delete_project_btn)
+        btn_row.addWidget(self.edit_project_btn, stretch=1)
+        btn_row.addWidget(self.delete_project_btn, stretch=1)
 
         layout.addLayout(section_row)
         layout.addWidget(self.sidebar_empty_hint)
         layout.addWidget(self.project_list, stretch=1)
+        layout.addWidget(self.new_project_btn)
         layout.addLayout(btn_row)
         return panel
 
@@ -323,7 +325,7 @@ class MainWindow(QMainWindow):
                 lambda _checked=False, ti=target_idx: self.tabs.setCurrentIndex(ti)
             )
             stepper_row.addWidget(pill)
-            self._step_pills.append((pill, tab_indices))
+            self._step_pills.append((pill, tab_indices, tip))
         stepper_row.addStretch(1)
 
         header_card_layout.addLayout(header_row)
@@ -397,11 +399,11 @@ class MainWindow(QMainWindow):
         self.import_recording_btn.clicked.connect(self._on_import_recording)
         sessions_actions.addWidget(self.import_recording_btn)
         sessions_actions.addStretch(1)
-        self.review_session_btn = QPushButton("Process & Review", sessions_tab)
+        self.review_session_btn = QPushButton("Process && Review", sessions_tab)
         self.review_session_btn.setObjectName("primaryButton")
         self.review_session_btn.setIcon(make_icon("spark", TOKENS.accent_fg, 14))
         self.review_session_btn.clicked.connect(self._on_review_selected_session)
-        self.delete_session_btn = QPushButton("Delete Selected Session", sessions_tab)
+        self.delete_session_btn = QPushButton("Delete Session", sessions_tab)
         self.delete_session_btn.setObjectName("subtleDangerButton")
         self.delete_session_btn.setIcon(make_icon("trash", TOKENS.danger_fg, 14))
         self.delete_session_btn.clicked.connect(self._on_delete_session)
@@ -474,7 +476,7 @@ class MainWindow(QMainWindow):
             self.review_widget.scenarios_changed.connect(self._on_scenarios_changed)
             self.review_widget.processing_started.connect(self._on_execution_state_changed)
             self.review_widget.processing_finished.connect(self._on_execution_state_changed)
-            self.tabs.addTab(self.review_widget, "Timeline & Scenarios")
+            self.tabs.addTab(self.review_widget, "Timeline && Scenarios")
 
         # Tab 5: Test Definitions & Generated Code
         if self._definition_service is not None:
@@ -484,7 +486,7 @@ class MainWindow(QMainWindow):
                 panel,
             )
             self.definitions_widget.definitions_changed.connect(self._on_definitions_changed)
-            self.tabs.addTab(self.definitions_widget, "Test Definitions & Code")
+            self.tabs.addTab(self.definitions_widget, "Test Definitions && Code")
 
         # Tab 6: Built-in Test Execution
         if self._execution_service is not None and self._definition_service is not None:
@@ -506,10 +508,103 @@ class MainWindow(QMainWindow):
         return panel
 
     def _sync_stepper(self, tab_index: int) -> None:
-        for pill, indices in self._step_pills:
+        for pill, indices, _tip in self._step_pills:
             is_active = tab_index in indices
             pill.setProperty("active", "true" if is_active else "false")
             self._repolish(pill)
+
+    def _sync_workflow_tabs(self) -> None:
+        """Progressively unlock workflow tabs and stepper pills as prior stages complete."""
+        has_session = self._bound_session_id is not None or self._active_worker is not None
+        has_processed = (
+            self.review_widget is not None and self.review_widget.has_processed_data
+        ) or (self.definitions_widget is not None and self.definitions_widget.has_definitions)
+        has_definitions = (
+            self.definitions_widget is not None and self.definitions_widget.has_definitions
+        ) or self._is_execution_running()
+
+        # Tab 0: Recording Sessions (always unlocked)
+        self.tabs.setTabEnabled(0, True)
+        self.tabs.setTabToolTip(0, "Manage recording sessions or import a JSON recording.")
+
+        # Tab 1 & 2: Browser Tabs and Recorded Events
+        self.tabs.setTabEnabled(1, has_session)
+        self.tabs.setTabToolTip(
+            1,
+            "Inspect browser tabs tracked in this session."
+            if has_session
+            else "Record or select a session first to view browser tabs.",
+        )
+        self.tabs.setTabEnabled(2, has_session)
+        self.tabs.setTabToolTip(
+            2,
+            "Inspect raw captured events for this session."
+            if has_session
+            else "Record or select a session first to view recorded events.",
+        )
+
+        # Tab 3: Timeline & Scenarios
+        if self.review_widget is not None:
+            idx = self.tabs.indexOf(self.review_widget)
+            if idx >= 0:
+                self.tabs.setTabEnabled(idx, has_session)
+                self.tabs.setTabToolTip(
+                    idx,
+                    "Watch video, process raw events, and review scenarios."
+                    if has_session
+                    else "Record or select a session first to unlock Timeline & Scenarios.",
+                )
+
+        # Tab 4: Test Definitions & Code
+        if self.definitions_widget is not None:
+            idx = self.tabs.indexOf(self.definitions_widget)
+            if idx >= 0:
+                self.tabs.setTabEnabled(idx, has_session and has_processed)
+                self.tabs.setTabToolTip(
+                    idx,
+                    (
+                        "Generate, edit, copy, and export standalone Pytest tests."
+                        if (has_session and has_processed)
+                        else (
+                            "Process the session in 'Timeline & Scenarios' first "
+                            "to unlock Test Definitions."
+                        )
+                    ),
+                )
+
+        # Tab 5: Test Execution
+        if self.execution_widget is not None:
+            idx = self.tabs.indexOf(self.execution_widget)
+            if idx >= 0:
+                self.tabs.setTabEnabled(idx, has_session and has_definitions)
+                self.tabs.setTabToolTip(
+                    idx,
+                    (
+                        "Run generated tests locally with live logs, screenshots, and traces."
+                        if (has_session and has_definitions)
+                        else (
+                            "Generate test definitions in 'Test Definitions & Code' first "
+                            "to unlock Test Execution."
+                        )
+                    ),
+                )
+
+        # Keep workflow stepper pills in sync with tab availability
+        for pill, tab_indices, enabled_tip in self._step_pills:
+            primary_idx = tab_indices[0]
+            tab_unlocked = self.tabs.isTabEnabled(primary_idx)
+            disabled_tip = self.tabs.tabToolTip(primary_idx)
+            set_button_state(
+                pill,
+                tab_unlocked,
+                enabled_tip=enabled_tip,
+                disabled_tip=disabled_tip,
+            )
+
+        # Never leave the user stranded on a disabled tab
+        current_idx = self.tabs.currentIndex()
+        if current_idx > 0 and not self.tabs.isTabEnabled(current_idx):
+            self.tabs.setCurrentIndex(0)
 
     # --- Project management handlers ---
 
@@ -579,10 +674,12 @@ class MainWindow(QMainWindow):
             self.definitions_widget.refresh(session_id)
         if self.execution_widget is not None and not self.execution_widget.is_running:
             self.execution_widget.refresh()
+        self._sync_workflow_tabs()
 
     def _on_definitions_changed(self, _session_id: str) -> None:
         if self.execution_widget is not None and not self.execution_widget.is_running:
             self.execution_widget.refresh()
+        self._sync_workflow_tabs()
 
     def _on_tab_changed(self, index: int) -> None:
         self._sync_stepper(index)
@@ -816,7 +913,8 @@ class MainWindow(QMainWindow):
         )
         ended_str = session.ended_at.strftime("%Y-%m-%d %H:%M:%S") if session.ended_at else "-"
 
-        status_item = QTableWidgetItem(session.status.value)
+        status_text = humanize_label(session.status.value)
+        status_item = QTableWidgetItem(status_text)
         status_item.setForeground(status_color(session.status.value))
 
         self.sessions_table.setItem(row_idx, 0, name_item)
@@ -1002,6 +1100,7 @@ class MainWindow(QMainWindow):
     def _on_worker_started(self, session_id: str) -> None:
         if session_id != self._active_session_id:
             return
+        self._sync_workflow_tabs()
         self._set_status_badge("Recording Active", "active")
         self.tabs.setCurrentIndex(2)
         self.statusBar().showMessage("Chromium running — recording session active.")
@@ -1105,6 +1204,7 @@ class MainWindow(QMainWindow):
         self._refresh_pages_table()
 
     def _bind_session_tabs(self, session_id: str | None, session_name: str = "") -> None:
+        self._bound_session_id = session_id
         if self.review_widget is not None:
             self.review_widget.load_session(session_id, session_name)
         if self.definitions_widget is not None:
@@ -1116,6 +1216,7 @@ class MainWindow(QMainWindow):
             )
         if self.execution_widget is not None and not self.execution_widget.is_running:
             self.execution_widget.load_session(session_id, session_name)
+        self._sync_workflow_tabs()
 
     def _clear_session_tabs(self) -> None:
         self._tracked_pages.clear()
@@ -1143,8 +1244,10 @@ class MainWindow(QMainWindow):
         row_idx = self.events_table.rowCount()
         self.events_table.insertRow(row_idx)
         self.events_table.setItem(row_idx, 0, QTableWidgetItem(str(event.sequence_no)))
-        self.events_table.setItem(row_idx, 1, QTableWidgetItem(event.event_type.value))
-        self.events_table.setItem(row_idx, 2, QTableWidgetItem(event.source.value))
+        self.events_table.setItem(
+            row_idx, 1, QTableWidgetItem(humanize_label(event.event_type.value))
+        )
+        self.events_table.setItem(row_idx, 2, QTableWidgetItem(humanize_label(event.source.value)))
         self.events_table.setItem(row_idx, 3, QTableWidgetItem(self._summarize_event(event)))
         self.events_table.setItem(
             row_idx, 4, QTableWidgetItem(event.timestamp.strftime("%H:%M:%S.%f")[:-3])

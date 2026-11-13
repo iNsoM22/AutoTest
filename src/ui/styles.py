@@ -172,6 +172,12 @@ QPushButton#stepPill[active="true"] {{
     font-weight: 600;
 }}
 
+QPushButton#stepPill:disabled {{
+    background-color: transparent;
+    color: {T.text_disabled};
+    border-color: transparent;
+}}
+
 QLabel#stepArrow {{
     color: {T.text_muted};
     font-size: 11px;
@@ -294,6 +300,27 @@ QPushButton#ghostButton:hover {{
 
 QPushButton#ghostButton:disabled {{
     color: {T.text_disabled};
+}}
+
+QPushButton#iconButton {{
+    background-color: {T.surface_elevated};
+    color: {T.text_primary};
+    border: 1px solid {T.border_default};
+    border-radius: 6px;
+    padding: 5px;
+    min-width: 28px;
+    max-width: 34px;
+}}
+
+QPushButton#iconButton:hover {{
+    background-color: {T.surface_hover};
+    border-color: {T.border_strong};
+}}
+
+QPushButton#iconButton:disabled {{
+    background-color: {T.surface};
+    color: {T.text_disabled};
+    border-color: {T.border_subtle};
 }}
 
 /* === Inputs === */
@@ -484,6 +511,12 @@ QTabBar::tab:selected {{
     border-color: {T.border_subtle};
     border-top: 2px solid {T.accent};
     font-weight: 600;
+}}
+
+QTabBar::tab:disabled {{
+    background-color: transparent;
+    color: {T.text_disabled};
+    border-color: transparent;
 }}
 
 /* === Splitters === */

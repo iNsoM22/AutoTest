@@ -48,6 +48,7 @@ from src.export import CopyExportService
 from src.processing import ProcessedActionType
 from src.ui.theme import (
     TOKENS,
+    humanize_label,
     make_icon,
     make_vseparator,
     set_button_state,
@@ -77,6 +78,11 @@ class DefinitionsWidget(QWidget):
         self._build_ui()
         self._update_controls()
 
+    @property
+    def has_definitions(self) -> bool:
+        """Return True when the loaded session has at least one test definition."""
+        return bool(self._definitions)
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -93,6 +99,7 @@ class DefinitionsWidget(QWidget):
             "Select a processed session to generate and edit test definitions.", toolbar_frame
         )
         self.summary_label.setObjectName("mutedLabel")
+        self.summary_label.setWordWrap(True)
 
         self.include_journey_checkbox = QCheckBox("Include Journey Test", toolbar_frame)
         self.include_journey_checkbox.setChecked(True)
@@ -115,6 +122,7 @@ class DefinitionsWidget(QWidget):
 
         # Left pane: Test definitions list
         left_pane = QWidget(splitter)
+        left_pane.setMinimumWidth(260)
         left_layout = QVBoxLayout(left_pane)
         left_layout.setContentsMargins(0, 0, 6, 0)
         left_layout.setSpacing(6)
@@ -202,13 +210,15 @@ class DefinitionsWidget(QWidget):
         self.edit_selector_btn = QPushButton("Edit Selector", actions_tab)
         self.edit_selector_btn.setIcon(make_icon("edit", TOKENS.text_primary, 13))
         self.edit_selector_btn.clicked.connect(self._on_edit_action_selector)
-        self.edit_value_btn = QPushButton("Edit Value/URL", actions_tab)
+        self.edit_value_btn = QPushButton("Edit Value", actions_tab)
         self.edit_value_btn.clicked.connect(self._on_edit_action_value)
-        self.move_action_up_btn = QPushButton("Up", actions_tab)
-        self.move_action_up_btn.setIcon(make_icon("up", TOKENS.text_primary, 13))
+        self.move_action_up_btn = QPushButton("", actions_tab)
+        self.move_action_up_btn.setObjectName("iconButton")
+        self.move_action_up_btn.setIcon(make_icon("up", TOKENS.text_primary, 14))
         self.move_action_up_btn.clicked.connect(lambda: self._on_move_action(-1))
-        self.move_action_down_btn = QPushButton("Down", actions_tab)
-        self.move_action_down_btn.setIcon(make_icon("down", TOKENS.text_primary, 13))
+        self.move_action_down_btn = QPushButton("", actions_tab)
+        self.move_action_down_btn.setObjectName("iconButton")
+        self.move_action_down_btn.setIcon(make_icon("down", TOKENS.text_primary, 14))
         self.move_action_down_btn.clicked.connect(lambda: self._on_move_action(1))
         self.delete_action_btn = QPushButton("Delete Step", actions_tab)
         self.delete_action_btn.setObjectName("subtleDangerButton")
@@ -295,9 +305,14 @@ class DefinitionsWidget(QWidget):
         code_title.setObjectName("sectionTitle")
         self.copy_status_label = QLabel("", code_pane)
         self.copy_status_label.setObjectName("successInline")
+        self.export_suite_btn = QPushButton("Export Suite...", code_pane)
+        self.export_suite_btn.setObjectName("primaryButton")
+        self.export_suite_btn.setIcon(make_icon("folder", TOKENS.accent_fg, 13))
+        self.export_suite_btn.clicked.connect(self._on_export_suite)
         code_header.addWidget(code_title)
-        code_header.addStretch(1)
-        code_header.addWidget(self.copy_status_label)
+        code_header.addSpacing(10)
+        code_header.addWidget(self.copy_status_label, stretch=1)
+        code_header.addWidget(self.export_suite_btn)
 
         self.code_preview = QPlainTextEdit(code_pane)
         self.code_preview.setObjectName("codePreview")
@@ -318,14 +333,10 @@ class DefinitionsWidget(QWidget):
         self.copy_scenario_btn.clicked.connect(self._on_copy_scenario)
         self.copy_selected_btn = QPushButton("Copy Selected", code_pane)
         self.copy_selected_btn.clicked.connect(self._on_copy_selected)
-        self.copy_all_btn = QPushButton("Copy All Tests", code_pane)
+        self.copy_all_btn = QPushButton("Copy All", code_pane)
         self.copy_all_btn.clicked.connect(self._on_copy_all)
-        self.copy_fixtures_btn = QPushButton("Copy Fixtures & Config", code_pane)
+        self.copy_fixtures_btn = QPushButton("Copy Fixtures && Config", code_pane)
         self.copy_fixtures_btn.clicked.connect(self._on_copy_fixtures)
-        self.export_suite_btn = QPushButton("Export Suite...", code_pane)
-        self.export_suite_btn.setObjectName("primaryButton")
-        self.export_suite_btn.setIcon(make_icon("folder", TOKENS.accent_fg, 13))
-        self.export_suite_btn.clicked.connect(self._on_export_suite)
 
         copy_bar.addWidget(self.copy_test_btn)
         copy_bar.addWidget(self.copy_scenario_btn)
@@ -333,7 +344,6 @@ class DefinitionsWidget(QWidget):
         copy_bar.addWidget(self.copy_all_btn)
         copy_bar.addWidget(self.copy_fixtures_btn)
         copy_bar.addStretch(1)
-        copy_bar.addWidget(self.export_suite_btn)
 
         code_layout.addLayout(code_header)
         code_layout.addWidget(self.code_preview, stretch=1)
@@ -512,7 +522,7 @@ class DefinitionsWidget(QWidget):
             else:
                 val_text = action.value or "-"
 
-            action_item = QTableWidgetItem(action.action_type.value)
+            action_item = QTableWidgetItem(humanize_label(action.action_type.value))
             action_item.setForeground(QColor(TOKENS.accent_hover))
             val_item = QTableWidgetItem(val_text)
             if action.is_redacted:
@@ -541,9 +551,11 @@ class DefinitionsWidget(QWidget):
             review_item.setForeground(status_color(review_text))
 
             self.assertions_table.setItem(row_idx, 0, on_item)
-            self.assertions_table.setItem(row_idx, 1, QTableWidgetItem(assertion.confidence.value))
             self.assertions_table.setItem(
-                row_idx, 2, QTableWidgetItem(assertion.assertion_type.value)
+                row_idx, 1, QTableWidgetItem(humanize_label(assertion.confidence.value))
+            )
+            self.assertions_table.setItem(
+                row_idx, 2, QTableWidgetItem(humanize_label(assertion.assertion_type.value))
             )
             self.assertions_table.setItem(row_idx, 3, QTableWidgetItem(detail))
             self.assertions_table.setItem(row_idx, 4, review_item)
@@ -802,25 +814,26 @@ class DefinitionsWidget(QWidget):
         defn = self._current_definition()
         if defn is None:
             return
-        type_choices = [
-            AssertionType.TEXT_VISIBLE.value,
-            AssertionType.URL_CONTAINS.value,
-            AssertionType.URL_EQUALS.value,
-            AssertionType.ELEMENT_VISIBLE.value,
-            AssertionType.ELEMENT_CHECKED.value,
-            AssertionType.ELEMENT_VALUE.value,
+        assertion_types = [
+            AssertionType.TEXT_VISIBLE,
+            AssertionType.URL_CONTAINS,
+            AssertionType.URL_EQUALS,
+            AssertionType.ELEMENT_VISIBLE,
+            AssertionType.ELEMENT_CHECKED,
+            AssertionType.ELEMENT_VALUE,
         ]
+        label_to_type = {humanize_label(t.value): t for t in assertion_types}
         chosen, ok = QInputDialog.getItem(
             self,
             "Add Assertion",
             "Assertion type:",
-            type_choices,
+            list(label_to_type.keys()),
             0,
             False,
         )
         if not ok:
             return
-        atype = AssertionType(chosen)
+        atype = label_to_type[chosen]
         selector = None
         expected = ""
 
@@ -1111,6 +1124,16 @@ class DefinitionsWidget(QWidget):
         )
         if defn is not None:
             self.toggle_def_btn.setText("Exclude" if defn.included else "Include")
+            set_button_state(
+                self.toggle_def_btn,
+                single and not busy,
+                enabled_tip=(
+                    "Exclude this test from full suite copy and export."
+                    if defn.included
+                    else "Include this test in full suite copy and export."
+                ),
+                disabled_tip=busy_tip if busy else "Select a single test definition first.",
+            )
         else:
             self.toggle_def_btn.setText("Exclude")
 
@@ -1171,16 +1194,31 @@ class DefinitionsWidget(QWidget):
 
         assertion_row = self.assertions_table.currentRow()
         has_assertion = defn is not None and 0 <= assertion_row < len(defn.assertions)
+        current_assertion = (
+            defn.assertions[assertion_row] if (has_assertion and defn is not None) else None
+        )
         set_button_state(
             self.add_assertion_btn,
             single and not busy,
             enabled_tip="Add a custom Playwright assertion to this test.",
             disabled_tip=busy_tip if busy else "Select a single test definition to add assertions.",
         )
+        if current_assertion is not None:
+            self.toggle_assertion_btn.setText(
+                "Disable Assertion" if current_assertion.enabled else "Enable Assertion"
+            )
+            toggle_tip = (
+                "Disable this assertion so it is omitted from generated code."
+                if current_assertion.enabled
+                else "Enable this assertion so it is included in generated code."
+            )
+        else:
+            self.toggle_assertion_btn.setText("Enable / Disable")
+            toggle_tip = "Enable or disable the selected assertion."
         set_button_state(
             self.toggle_assertion_btn,
             has_assertion and not busy,
-            enabled_tip="Enable or disable the selected assertion in generated code.",
+            enabled_tip=toggle_tip,
             disabled_tip=busy_tip if busy else "Select an assertion row first.",
         )
         set_button_state(

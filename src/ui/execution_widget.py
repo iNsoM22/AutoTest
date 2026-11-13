@@ -42,6 +42,7 @@ from src.execution import (
 )
 from src.ui.theme import (
     TOKENS,
+    humanize_label,
     make_icon,
     make_vseparator,
     set_button_state,
@@ -160,6 +161,7 @@ class ExecutionWidget(QWidget):
 
         self.summary_label = QLabel("Idle — select tests and click Run.", self)
         self.summary_label.setObjectName("mutedLabel")
+        self.summary_label.setWordWrap(True)
 
         modes_row.addWidget(self.run_scenario_btn)
         modes_row.addWidget(self.run_independent_btn)
@@ -167,9 +169,9 @@ class ExecutionWidget(QWidget):
         modes_row.addWidget(self.run_suite_btn)
         modes_row.addWidget(make_vseparator(self))
         modes_row.addWidget(self.rerun_failed_btn)
-        modes_row.addSpacing(8)
-        modes_row.addWidget(self.summary_label, stretch=1)
+        modes_row.addStretch(1)
         root.addLayout(modes_row)
+        root.addWidget(self.summary_label)
 
         self._run_progress = QProgressBar(self)
         self._run_progress.setRange(0, 0)
@@ -181,6 +183,7 @@ class ExecutionWidget(QWidget):
         main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
         left_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        left_splitter.setMinimumWidth(265)
 
         # Left-Top: Test Definitions checklist
         tests_panel = QWidget(self)
@@ -272,7 +275,7 @@ class ExecutionWidget(QWidget):
         self.traceback_view.setPlaceholderText(
             "Select a test result to inspect tracebacks and output."
         )
-        self.detail_tabs.addTab(self.traceback_view, "Traceback & Output")
+        self.detail_tabs.addTab(self.traceback_view, "Traceback && Output")
 
         self.errors_view = QPlainTextEdit(self)
         self.errors_view.setReadOnly(True)
@@ -280,7 +283,7 @@ class ExecutionWidget(QWidget):
         self.errors_view.setPlaceholderText(
             "Browser console and network errors appear here on failure."
         )
-        self.detail_tabs.addTab(self.errors_view, "Console & Network")
+        self.detail_tabs.addTab(self.errors_view, "Console && Network")
 
         self.screenshot_label = QLabel("No failure screenshot.", self)
         self.screenshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -396,7 +399,7 @@ class ExecutionWidget(QWidget):
         self.tests_list.blockSignals(True)
         self.tests_list.clear()
         for defn in self._definitions:
-            tag = "journey" if defn.mode.value == "journey" else "indep"
+            tag = "Journey" if defn.mode.value == "journey" else "Independent"
             item = QListWidgetItem(f"[{tag}] {defn.name}")
             item.setData(Qt.ItemDataRole.UserRole, defn.id)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -416,7 +419,7 @@ class ExecutionWidget(QWidget):
         for idx, run in enumerate(self._runs):
             ts = run.started_at.strftime("%H:%M:%S")
             text = (
-                f"[{run.status.value.upper()}] {run.mode.value} — "
+                f"[{humanize_label(run.status.value)}] {humanize_label(run.mode.value)} — "
                 f"{run.passed_count}/{run.total_count} passed ({ts})"
             )
             item = QListWidgetItem(text)
@@ -681,7 +684,7 @@ class ExecutionWidget(QWidget):
         name_item.setData(Qt.ItemDataRole.UserRole, result.id)
         dur_str = f"{result.duration_ms} ms" if result.duration_ms else "-"
 
-        status_item = QTableWidgetItem(result.status.value.upper())
+        status_item = QTableWidgetItem(humanize_label(result.status.value))
         status_item.setForeground(status_color(result.status.value))
 
         self.results_table.setItem(target_row, 0, status_item)

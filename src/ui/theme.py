@@ -268,8 +268,29 @@ def status_color(status_text: str) -> QColor:
         return QColor(TOKENS.success_fg)
     if normalized in ("failed", "error", "cancelled"):
         return QColor(TOKENS.danger_fg)
-    if normalized in ("running", "launching", "stopping", "journey"):
+    if normalized in ("running", "launching", "stopping", "journey", "in_progress", "in progress"):
         return QColor(TOKENS.info_fg)
     if normalized in ("skipped", "review", "partial", "warning"):
         return QColor(TOKENS.warning_fg)
     return QColor(TOKENS.text_secondary)
+
+
+_ACRONYMS = {
+    "api": "API",
+    "css": "CSS",
+    "dom": "DOM",
+    "http": "HTTP",
+    "id": "ID",
+    "json": "JSON",
+    "pdf": "PDF",
+    "ui": "UI",
+    "url": "URL",
+}
+
+
+def humanize_label(raw: str) -> str:
+    """Convert internal snake_case enum values into clean, user-friendly labels."""
+    if not raw:
+        return ""
+    words = raw.replace("-", "_").split("_")
+    return " ".join(_ACRONYMS.get(w.lower(), w.capitalize()) for w in words if w)

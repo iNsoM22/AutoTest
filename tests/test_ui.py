@@ -248,6 +248,35 @@ def test_project_switching_clears_tabs_and_session_reloads_pages(
     assert not window.review_widget.process_btn.isEnabled()
     window.review_widget.set_external_busy(False)
     assert window.review_widget.process_btn.isEnabled()
+
+    # Progressive workflow gating: Definitions & Execution stay locked until prior stage finishes
+    assert not window.tabs.isTabEnabled(window.tabs.indexOf(window.definitions_widget))
+    assert window.execution_widget is not None
+    assert not window.tabs.isTabEnabled(window.tabs.indexOf(window.execution_widget))
+
+    # Process s2 so Definitions tab unlocks, then verify external busy lock on DefinitionsWidget
+    from src.recording.models import EventSource, EventType, RawEvent
+
+    app_context.event_repository.insert_batch(
+        [
+            RawEvent(
+                project_id=p2.id,
+                session_id=s2.id,
+                sequence_no=1,
+                page_id="pg-beta-1",
+                source=EventSource.PLAYWRIGHT,
+                event_type=EventType.NAVIGATION,
+                payload={"url": "https://beta.example.com/dash"},
+            )
+        ]
+    )
+    window.review_widget.process_current_session()
+    qtbot.waitUntil(
+        lambda: window.review_widget is not None and not window.review_widget.is_processing,
+        timeout=5000,
+    )
+    assert window.tabs.isTabEnabled(window.tabs.indexOf(window.definitions_widget))
+    assert not window.tabs.isTabEnabled(window.tabs.indexOf(window.execution_widget))
     window.definitions_widget.set_external_busy(True)
     assert not window.definitions_widget.generate_btn.isEnabled()
     window.definitions_widget.set_external_busy(False)
@@ -340,7 +369,19 @@ def test_ui_ux_validation_tooltips_and_conditional_disabling(
     )
     window.review_widget.process_current_session()
     qtbot.waitUntil(lambda: not window.review_widget.is_processing, timeout=5000)
+
+    # Toggle button updates text dynamically when toggled on/off
+    assert window.review_widget.show_all_steps_btn.text() == "Show All Steps"
+    window.review_widget.show_all_steps_btn.setChecked(True)
+    assert window.review_widget.show_all_steps_btn.text() == "Show Selected Scenario"
+    window.review_widget.show_all_steps_btn.setChecked(False)
+    assert window.review_widget.show_all_steps_btn.text() == "Show All Steps"
+
+    # Definitions unlocked after processing; Execution unlocks only after generation
+    assert window.tabs.isTabEnabled(window.tabs.indexOf(window.definitions_widget))
+    assert not window.tabs.isTabEnabled(window.tabs.indexOf(window.execution_widget))
     window.definitions_widget.generate_for_current_session()
+    assert window.tabs.isTabEnabled(window.tabs.indexOf(window.execution_widget))
     assert window.execution_widget.run_selected_btn.isEnabled()
     for i in range(window.execution_widget.tests_list.count()):
         item = window.execution_widget.tests_list.item(i)

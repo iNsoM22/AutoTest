@@ -37,6 +37,7 @@ from src.scenarios import Scenario, ScenarioError, ScenarioService
 from src.storage import ArtifactManager, ArtifactRecord, ArtifactRepository
 from src.ui.theme import (
     TOKENS,
+    humanize_label,
     make_icon,
     make_vseparator,
     set_button_state,
@@ -85,6 +86,11 @@ class ReviewWidget(QWidget):
     def is_processing(self) -> bool:
         """Return True while background session processing or reproduction is running."""
         return self._worker is not None or self._repro_worker is not None
+
+    @property
+    def has_processed_data(self) -> bool:
+        """Return True when the loaded session has processed timeline steps or scenarios."""
+        return bool(self._timeline or self._scenarios)
 
     def set_external_busy(self, busy: bool) -> None:
         """Lock/unlock review controls while another tab holds an active worker."""
@@ -139,6 +145,7 @@ class ReviewWidget(QWidget):
             "Select a recording session to process and review.", primary_strip
         )
         self.summary_label.setObjectName("mutedLabel")
+        self.summary_label.setWordWrap(True)
 
         self.reproduce_btn = QPushButton("Reproduce", primary_strip)
         self.reproduce_btn.setIcon(make_icon("replay", TOKENS.text_primary, 14))
@@ -196,6 +203,7 @@ class ReviewWidget(QWidget):
 
         # Left: Scenarios pane
         scenarios_pane = QWidget(splitter)
+        scenarios_pane.setMinimumWidth(280)
         scenarios_layout = QVBoxLayout(scenarios_pane)
         scenarios_layout.setContentsMargins(0, 0, 6, 0)
         scenarios_layout.setSpacing(6)
@@ -234,14 +242,16 @@ class ReviewWidget(QWidget):
         self.split_btn = QPushButton("Split Here", scenarios_pane)
         self.split_btn.setIcon(make_icon("split", TOKENS.text_primary, 13))
         self.split_btn.clicked.connect(self._on_split_scenario)
-        self.move_up_btn = QPushButton("Up", scenarios_pane)
-        self.move_up_btn.setIcon(make_icon("up", TOKENS.text_primary, 13))
+        self.move_up_btn = QPushButton("", scenarios_pane)
+        self.move_up_btn.setObjectName("iconButton")
+        self.move_up_btn.setIcon(make_icon("up", TOKENS.text_primary, 14))
         self.move_up_btn.clicked.connect(lambda: self._on_move_scenario(-1))
-        self.move_down_btn = QPushButton("Down", scenarios_pane)
-        self.move_down_btn.setIcon(make_icon("down", TOKENS.text_primary, 13))
+        self.move_down_btn = QPushButton("", scenarios_pane)
+        self.move_down_btn.setObjectName("iconButton")
+        self.move_down_btn.setIcon(make_icon("down", TOKENS.text_primary, 14))
         self.move_down_btn.clicked.connect(lambda: self._on_move_scenario(1))
-        row2.addWidget(self.merge_btn)
-        row2.addWidget(self.split_btn)
+        row2.addWidget(self.merge_btn, stretch=1)
+        row2.addWidget(self.split_btn, stretch=1)
         row2.addWidget(self.move_up_btn)
         row2.addWidget(self.move_down_btn)
 
@@ -500,7 +510,7 @@ class ReviewWidget(QWidget):
             evidence_text = f"{len(event.raw_event_ids)} raw"
             time_text = event.started_at.strftime("%H:%M:%S.%f")[:-3]
 
-            action_item = QTableWidgetItem(event.action_type.value)
+            action_item = QTableWidgetItem(humanize_label(event.action_type.value))
             action_item.setForeground(QColor(TOKENS.accent_hover))
             outcomes_item = QTableWidgetItem(outcomes_text)
             if event.outcomes:
@@ -873,10 +883,18 @@ class ReviewWidget(QWidget):
             enabled_tip="Normalize raw events, correlate outcomes, and detect logical scenarios.",
             disabled_tip=busy_tip if busy else "Select a recording session first.",
         )
+        showing_all = self.show_all_steps_btn.isChecked()
+        self.show_all_steps_btn.setText(
+            "Show Selected Scenario" if showing_all else "Show All Steps"
+        )
         set_button_state(
             self.show_all_steps_btn,
             has_session and not busy and has_timeline,
-            enabled_tip="Toggle between all session steps and only the selected scenario's steps.",
+            enabled_tip=(
+                "Click to collapse back to only the selected scenario's steps."
+                if showing_all
+                else "Expand to show every step in the session across all scenarios."
+            ),
             disabled_tip=busy_tip if busy else "Process a session first to view timeline steps.",
         )
         set_button_state(
@@ -965,6 +983,16 @@ class ReviewWidget(QWidget):
         if single and not busy:
             sc = selected[0]
             self.toggle_include_btn.setText("Exclude" if sc.included else "Include")
+            set_button_state(
+                self.toggle_include_btn,
+                True,
+                enabled_tip=(
+                    "Exclude this scenario from generated test definitions."
+                    if sc.included
+                    else "Include this scenario in generated test definitions."
+                ),
+                disabled_tip="",
+            )
             idx = self._scenarios.index(sc)
             set_button_state(
                 self.move_up_btn,
