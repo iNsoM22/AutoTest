@@ -48,6 +48,9 @@ def _url_path_fragment(url: str) -> str:
     parsed = urlsplit(url)
     path = parsed.path or "/"
     if parsed.query:
+        query_upper = parsed.query.upper()
+        if _REDACTED_MARKER in parsed.query or "%5BREDACTED%5D" in query_upper:
+            return path
         return f"{path}?{parsed.query}"
     return path
 
@@ -64,7 +67,7 @@ def _is_auth_redacted_event(event: ProcessedEvent) -> bool:
     if "cc-" in autocomplete:
         return False
     field_text = " ".join(
-        str(target.get(k, "")).lower() for k in ("name", "id", "aria_label", "placeholder")
+        str(target.get(k, "")).lower() for k in ("name", "id", "aria_label", "label", "placeholder")
     )
     return any(kw in field_text for kw in _AUTH_FIELD_KEYWORDS)
 
@@ -282,7 +285,7 @@ class TestDefinitionBuilder:
             mods = [
                 _MODIFIER_KEY_MAP[m]
                 for m in ("ctrl", "alt", "shift", "meta")
-                if event.payload.get(m)
+                if event.payload.get(m) and _MODIFIER_KEY_MAP[m].lower() != raw_key.lower()
             ]
             key = "+".join([*mods, raw_key]) if mods and raw_key else raw_key
         elif event.action_type == ProcessedActionType.SCROLL:
@@ -447,6 +450,8 @@ class TestDefinitionBuilder:
                 continue
             for entry in notable:
                 if not isinstance(entry, dict):
+                    continue
+                if entry.get("visible") is False:
                     continue
                 text = " ".join(str(entry.get("text", "")).split())
                 if text and len(text) <= 120:

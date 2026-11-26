@@ -370,3 +370,86 @@ def test_definition_service_crud_and_layer_isolation(tmp_settings: AppSettings) 
         assert len(scenario_svc.list_scenarios(session.id)) == 1
     finally:
         db.close_all()
+
+
+def test_selectors_and_builder_handle_labels_contenteditable_redacted_urls_and_hidden_dom() -> None:
+    # 1. Associated <label> produces ROLE + LABEL candidates
+    primary, fallbacks = build_selector_candidates(
+        {"tag": "input", "input_type": "text", "label": "Full Name", "id": "full-name"}
+    )
+    assert primary is not None
+    assert primary.strategy == SelectorStrategy.ROLE
+    assert primary.role == "textbox"
+    assert primary.name == "Full Name"
+    assert any(c.strategy == SelectorStrategy.LABEL and c.value == "Full Name" for c in fallbacks)
+
+    # 2. data-test / data-qa map to CSS attribute selectors; contenteditable maps to textbox role
+    qa_primary, _ = build_selector_candidates(
+        {"tag": "button", "test_id": "save-order", "test_id_attr": "data-qa"}
+    )
+    assert qa_primary is not None
+    assert qa_primary.strategy == SelectorStrategy.CSS
+    assert qa_primary.value == '[data-qa="save-order"]'
+
+    ce_primary, _ = build_selector_candidates(
+        {"tag": "div", "contenteditable": True, "aria_label": "Comment body"}
+    )
+    assert ce_primary is not None
+    assert ce_primary.strategy == SelectorStrategy.ROLE
+    assert ce_primary.role == "textbox"
+    assert ce_primary.name == "Comment body"
+
+    # 3. Redacted URL query params are stripped from URL_CONTAINS; hidden DOM mutations skipped
+    t0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    ev = ProcessedEvent(
+        id="pe-edge",
+        project_id="p1",
+        session_id="s1",
+        page_id="pg1",
+        order_index=1,
+        action_type=ProcessedActionType.CLICK,
+        summary="Click 'Continue'",
+        target={"tag": "button", "text": "Continue"},
+        outcomes=[
+            CorrelatedOutcome(
+                outcome_type=OutcomeType.NAVIGATION,
+                summary="Navigated to /callback?token=[REDACTED]",
+                details={"url": "https://app.example.com/callback?token=%5BREDACTED%5D&ok=1"},
+                raw_event_ids=["r1"],
+                timestamp=t0,
+            ),
+            CorrelatedOutcome(
+                outcome_type=OutcomeType.DOM_CHANGE,
+                summary="DOM: modal hidden changed",
+                details={
+                    "notable": [
+                        {"tag": "div", "id": "spinner", "attribute": "hidden", "visible": False}
+                    ]
+                },
+                raw_event_ids=["r2"],
+                timestamp=t0,
+            ),
+        ],
+        raw_event_ids=["r1", "r2"],
+        started_at=t0,
+        ended_at=t0,
+    )
+    sc = Scenario(
+        id="sc-edge",
+        project_id="p1",
+        session_id="s1",
+        name="Callback Flow",
+        order_index=1,
+        processed_event_ids=[ev.id],
+    )
+    defs = TestDefinitionBuilder().build(
+        project_id="p1",
+        session_id="s1",
+        scenarios=[sc],
+        timeline=[ev],
+        include_journey=False,
+    )
+    assert len(defs[0].assertions) == 1
+    assert defs[0].assertions[0].assertion_type == AssertionType.URL_CONTAINS
+    assert defs[0].assertions[0].expected == "/callback"
+    assert "REDACTED" not in defs[0].assertions[0].expected

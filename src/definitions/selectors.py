@@ -88,6 +88,8 @@ def _infer_role(target: dict[str, Any]) -> str:
         return ""
     if tag == "a":
         return "link" if bool(str(target.get("href", "")).strip()) else ""
+    if target.get("contenteditable") is True:
+        return "textbox"
     return _TAG_TO_ROLE.get(tag, "")
 
 
@@ -121,7 +123,7 @@ def build_selector_candidates(
     test_id = str(target.get("test_id", "")).strip()
     test_id_attr = str(target.get("test_id_attr", "")).strip().lower()
     if test_id:
-        if test_id_attr in ("data-test-id", "data-cy"):
+        if test_id_attr in ("data-test-id", "data-cy", "data-test", "data-qa"):
             _add(
                 SelectorCandidate(
                     strategy=SelectorStrategy.CSS,
@@ -139,10 +141,12 @@ def build_selector_candidates(
             )
 
     aria_label = str(target.get("aria_label", "")).strip()
+    associated_label = str(target.get("label", "")).strip()
+    label_name = aria_label or associated_label
     raw_text = " ".join(str(target.get("text", "")).split())
     short_text = raw_text if 0 < len(raw_text) <= 60 else ""
     role = _infer_role(target)
-    accessible_name = aria_label or short_text
+    accessible_name = label_name or short_text
 
     if role and accessible_name:
         _add(
@@ -155,11 +159,11 @@ def build_selector_candidates(
             )
         )
 
-    if aria_label:
+    if label_name:
         _add(
             SelectorCandidate(
                 strategy=SelectorStrategy.LABEL,
-                value=aria_label,
+                value=label_name,
                 confidence=0.88,
             )
         )
