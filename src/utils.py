@@ -22,6 +22,7 @@ def target_label(target: Mapping[str, Any], *, default: str = "element") -> str:
     for key in (
         "text",
         "aria_label",
+        "label",
         "placeholder",
         "test_id",
         "name",

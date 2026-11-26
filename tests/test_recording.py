@@ -125,6 +125,14 @@ def test_redaction_masks_passwords_tokens_and_urls() -> None:
     assert "page=2" in header_payload["url"]
     assert redact_url("about:blank") == "about:blank"
 
+    # Associated <label> text triggers redaction even if input has no sensitive name/id
+    _, label_payload = redact_target_and_payload(
+        {"tag": "input", "input_type": "text", "label": "Master Password"},
+        {"value": "LabelSecret42!"},
+    )
+    assert label_payload["value"] == REDACTED_VALUE
+    assert label_payload["redacted"] is True
+
 
 def test_collector_batches_events_and_artifact_repository_persists(
     app_context: AppContext,

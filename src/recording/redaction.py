@@ -131,6 +131,7 @@ def redact_target_and_payload(
     target_name = str(clean_target.get("name", ""))
     target_id = str(clean_target.get("id", ""))
     aria_label = str(clean_target.get("aria_label", ""))
+    label_text = str(clean_target.get("label", ""))
     placeholder = str(clean_target.get("placeholder", ""))
     autocomplete = str(clean_target.get("autocomplete", "")).lower()
 
@@ -139,6 +140,7 @@ def redact_target_and_payload(
         or is_sensitive_key(target_name)
         or is_sensitive_key(target_id)
         or is_sensitive_key(aria_label)
+        or is_sensitive_key(label_text)
         or is_sensitive_key(placeholder)
         or "password" in autocomplete
         or "cc-" in autocomplete

@@ -4,6 +4,19 @@
 
   const SENSITIVE_RE =
     /(password|passwd|secret|token|api[_-]?key|authorization|cookie|session[_-]?id|credit[_-]?card|card[_-]?number|private[_-]?key|(?:^|[^a-z0-9])(?:pwd|auth|cvv|cvc|ssn|pin|otp)(?:$|[^a-z0-9]))/i;
+  const DYNAMIC_ID_RE =
+    /(?:^[0-9a-f]{8,}$|^[0-9]+$|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|^ember\d+$|^react-[a-z0-9-]+$|^:r[0-9a-z]+:$|^mui-\d+$|^radix-[a-z0-9:-]+$|^headlessui-[a-z0-9:-]+$|^mat-(?:input|select|option|tab|mdc)-\d+$|^cdk-[a-z0-9-]+-\d+$|[_-][0-9a-f]{8,}$|[_-]\d{6,}$|[:]\w+[:])/i;
+  const TEST_ID_ATTRS = ["data-testid", "data-test-id", "data-cy", "data-test", "data-qa"];
+  const MODIFIER_ONLY_KEYS = new Set(["Control", "Shift", "Alt", "Meta"]);
+  const NON_TEXT_INPUT_TYPES = new Set([
+    "checkbox",
+    "radio",
+    "file",
+    "button",
+    "submit",
+    "reset",
+    "image",
+  ]);
   const MEANINGFUL_KEYS = new Set([
     "Enter",
     "Escape",
@@ -16,7 +29,7 @@
     "ArrowRight",
   ]);
   const INTERACTIVE_SELECTOR =
-    'a, button, input, select, textarea, summary, [role="button"], [role="link"], [role="menuitem"], [aria-haspopup], [tabindex]';
+    'a, button, input, select, textarea, summary, label, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [aria-haspopup], [tabindex]';
   const NOTABLE_MUTATION_SELECTOR =
     'h1, h2, h3, [role="alert"], [role="status"], [role="dialog"], dialog, .toast, .alert, .error, .modal';
 
@@ -35,6 +48,28 @@
     }
   }
 
+  function getAssociatedLabel(el) {
+    if (!el || el.nodeType !== 1) return "";
+    const labelledBy = el.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const parts = labelledBy
+        .split(/\s+/)
+        .map((id) => {
+          const node = id ? document.getElementById(id) : null;
+          return node ? cleanText(node.innerText || node.textContent || "") : "";
+        })
+        .filter(Boolean);
+      if (parts.length) return cleanText(parts.join(" "));
+    }
+    if (el.labels && el.labels.length > 0) {
+      const parts = Array.from(el.labels)
+        .map((lbl) => cleanText(lbl.innerText || lbl.textContent || ""))
+        .filter(Boolean);
+      if (parts.length) return cleanText(parts.join(" "));
+    }
+    return "";
+  }
+
   function isSensitiveElement(el) {
     if (!el || el.nodeType !== 1) return false;
     const type = (el.getAttribute("type") || "").toLowerCase();
@@ -44,11 +79,13 @@
     const name = el.getAttribute("name") || "";
     const id = el.getAttribute("id") || "";
     const ariaLabel = el.getAttribute("aria-label") || "";
+    const label = getAssociatedLabel(el);
     const placeholder = el.getAttribute("placeholder") || "";
     return (
       SENSITIVE_RE.test(name) ||
       SENSITIVE_RE.test(id) ||
       SENSITIVE_RE.test(ariaLabel) ||
+      SENSITIVE_RE.test(label) ||
       SENSITIVE_RE.test(placeholder)
     );
   }
@@ -65,13 +102,13 @@
     let depth = 0;
     while (current && current.nodeType === 1 && depth < 5) {
       const tag = current.tagName.toLowerCase();
-      if (current.id) {
+      if (current.id && !DYNAMIC_ID_RE.test(current.id.trim())) {
         parts.unshift(`#${CSS.escape(current.id)}`);
         break;
       }
       let matchedTestAttr = "";
       let matchedTestId = "";
-      for (const attr of ["data-testid", "data-test-id", "data-cy"]) {
+      for (const attr of TEST_ID_ATTRS) {
         const val = current.getAttribute(attr);
         if (val) {
           matchedTestAttr = attr;
@@ -122,7 +159,7 @@
     };
     let testIdAttr = "";
     let testIdVal = "";
-    for (const attr of ["data-testid", "data-test-id", "data-cy"]) {
+    for (const attr of TEST_ID_ATTRS) {
       const val = el.getAttribute(attr);
       if (val) {
         testIdAttr = attr;
@@ -130,11 +167,14 @@
         break;
       }
     }
+    const inputType = (el.getAttribute("type") || "").toLowerCase();
+    const associatedLabel = getAssociatedLabel(el);
     const attrs = {
       id: el.id || "",
       name: el.getAttribute("name") || "",
       role: el.getAttribute("role") || "",
       aria_label: el.getAttribute("aria-label") || "",
+      label: associatedLabel,
       placeholder: el.getAttribute("placeholder") || "",
       input_type: el.getAttribute("type") || "",
       autocomplete: el.getAttribute("autocomplete") || "",
@@ -147,9 +187,17 @@
     for (const [k, v] of Object.entries(attrs)) {
       if (v) target[k] = v;
     }
-    if (!sensitive && tag !== "input" && tag !== "textarea") {
-      const text = cleanText(el.innerText || el.textContent || "");
-      if (text) target.text = text;
+    if (el.isContentEditable) {
+      target.contenteditable = true;
+    }
+    if (!sensitive) {
+      if (tag === "input" && (inputType === "submit" || inputType === "button" || inputType === "reset")) {
+        const btnText = cleanText(el.value || "");
+        if (btnText) target.text = btnText;
+      } else if (tag !== "input" && tag !== "textarea") {
+        const text = cleanText(el.innerText || el.textContent || "");
+        if (text) target.text = text;
+      }
     }
     return target;
   }
@@ -174,6 +222,11 @@
     (event) => {
       const el = resolveElement(event, false);
       if (!el) return;
+      const tag = el.tagName.toLowerCase();
+      const inputType = (el.getAttribute("type") || "").toLowerCase();
+      if (tag === "select" || (tag === "input" && NON_TEXT_INPUT_TYPES.has(inputType))) {
+        return;
+      }
       const sensitive = isSensitiveElement(el);
       const rawValue = typeof el.value === "string" ? el.value : cleanText(el.textContent || "");
       const payload = {
@@ -259,6 +312,7 @@
   document.addEventListener(
     "keydown",
     (event) => {
+      if (MODIFIER_ONLY_KEYS.has(event.key)) return;
       const hasModifier = event.ctrlKey || event.metaKey || event.altKey;
       if (!MEANINGFUL_KEYS.has(event.key) && !hasModifier) return;
       const el = resolveElement(event, false);
@@ -334,13 +388,26 @@
     { passive: true, capture: true }
   );
 
-  // --- SPA back/forward & tab focus ---
-  window.addEventListener("popstate", () => {
+  // --- SPA back/forward, hash navigation & tab focus ---
+  let lastSpaUrl = window.location ? window.location.href : "";
+
+  function emitSpaNavigation(navType) {
+    const url = window.location ? window.location.href : "";
+    if (!url || url === lastSpaUrl) return;
+    lastSpaUrl = url;
     send("navigation", { tag: "window" }, {
-      url: window.location ? window.location.href : "",
+      url,
       title: document.title || "",
-      navigation_type: "back_forward",
+      navigation_type: navType,
     });
+  }
+
+  window.addEventListener("popstate", () => {
+    emitSpaNavigation("back_forward");
+  });
+
+  window.addEventListener("hashchange", () => {
+    emitSpaNavigation("hashchange");
   });
 
   let wasHidden = false;
