@@ -37,6 +37,7 @@ _NAV_TRIGGER_ACTIONS = frozenset(
     }
 )
 _KEEP_KEYS = frozenset({"Enter", "Escape"})
+_MODIFIER_ONLY_KEYS = frozenset({"Control", "Shift", "Alt", "Meta"})
 
 
 def _ms_between(start: datetime, end: datetime) -> float:
@@ -195,6 +196,8 @@ class ProcessingEngine:
 
         if etype == EventType.KEYDOWN:
             key = str(payload.get("key", ""))
+            if not key or key in _MODIFIER_ONLY_KEYS:
+                return True
             has_modifier = bool(payload.get("ctrl") or payload.get("alt") or payload.get("meta"))
             return key not in _KEEP_KEYS and not has_modifier
 
@@ -465,7 +468,29 @@ class ProcessingEngine:
                 and _ms_between(last.ended_at, event.timestamp)
                 <= self._config.input_merge_window_ms
             ):
+                was_redacted = bool(last.payload.get("redacted"))
                 last.payload.update(event.payload)
+                if was_redacted:
+                    last.payload["redacted"] = True
+                    last.payload["value"] = "[REDACTED]"
+                last.ended_at = max(last.ended_at, event.timestamp)
+                last.raw_event_ids = _merge_ids(last.raw_event_ids, [event.id])
+                return
+            # Collapse redundant focus-click immediately before typing into the same field
+            if (
+                last is not None
+                and last.page_id == event.page_id
+                and last.action_type == ProcessedActionType.CLICK
+                and _ms_between(last.ended_at, event.timestamp)
+                <= self._config.input_merge_window_ms
+                and (
+                    _target_key(last.target) == _target_key(event.target)
+                    or str(last.target.get("tag", "")).lower() == "label"
+                )
+            ):
+                last.action_type = ProcessedActionType.FILL
+                last.target = dict(event.target)
+                last.payload = dict(event.payload)
                 last.ended_at = max(last.ended_at, event.timestamp)
                 last.raw_event_ids = _merge_ids(last.raw_event_ids, [event.id])
                 return
@@ -477,16 +502,31 @@ class ProcessingEngine:
             input_type = str(event.target.get("input_type", "")).lower()
 
             if tag == "select":
+                # Collapse preceding focus-click or spurious input on the same <select>
+                if (
+                    last is not None
+                    and last.page_id == event.page_id
+                    and last.action_type in (ProcessedActionType.CLICK, ProcessedActionType.FILL)
+                    and _target_key(last.target) == _target_key(event.target)
+                    and _ms_between(last.ended_at, event.timestamp)
+                    <= self._config.input_merge_window_ms
+                ):
+                    last.action_type = ProcessedActionType.SELECT
+                    last.target = dict(event.target)
+                    last.payload = dict(event.payload)
+                    last.ended_at = max(last.ended_at, event.timestamp)
+                    last.raw_event_ids = _merge_ids(last.raw_event_ids, [event.id])
+                    return
                 actions.append(self._make_action(event, ProcessedActionType.SELECT))
                 return
 
             if input_type in ("checkbox", "radio"):
-                # Collapse preceding click on the same checkbox/radio or its label
+                # Collapse preceding click/spurious-fill on the same checkbox/radio or its label
                 if (
                     last is not None
                     and last.page_id == event.page_id
-                    and last.action_type == ProcessedActionType.CLICK
-                    and _ms_between(last.ended_at, event.timestamp) <= 300.0
+                    and last.action_type in (ProcessedActionType.CLICK, ProcessedActionType.FILL)
+                    and _ms_between(last.ended_at, event.timestamp) <= 500.0
                     and (
                         _target_key(last.target) == _target_key(event.target)
                         or str(last.target.get("tag", "")).lower() == "label"
@@ -508,7 +548,10 @@ class ProcessingEngine:
                 and last.action_type == ProcessedActionType.FILL
                 and _target_key(last.target) == _target_key(event.target)
             ):
-                if "value" in event.payload:
+                if event.payload.get("redacted"):
+                    last.payload["redacted"] = True
+                    last.payload["value"] = "[REDACTED]"
+                elif not last.payload.get("redacted") and "value" in event.payload:
                     last.payload["value"] = event.payload["value"]
                 last.ended_at = max(last.ended_at, event.timestamp)
                 last.raw_event_ids = _merge_ids(last.raw_event_ids, [event.id])

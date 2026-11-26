@@ -286,3 +286,78 @@ def test_processing_groups_inputs_collapses_submit_and_correlates_outcomes() -> 
         OutcomeType.DOM_CHANGE,
     ]
     assert set(submit.raw_event_ids) == {"ev-8", "ev-9", "ev-10", "ev-11", "ev-12", "ev-13"}
+
+
+def test_processing_collapses_focus_clicks_spurious_inputs_and_drops_modifier_only_keys() -> None:
+    email_target = {"tag": "input", "id": "email", "label": "Email Address", "css_path": "#email"}
+    pw_target = {"tag": "input", "id": "pw", "input_type": "password", "css_path": "#pw"}
+    role_select = {"tag": "select", "id": "role", "label": "Role", "css_path": "#role"}
+
+    events = [
+        # Focus click on email input followed immediately by typing -> single FILL
+        _make_event(
+            1, EventType.CLICK, offset_ms=100, target=email_target, payload={"is_trusted": True}
+        ),
+        _make_event(
+            2,
+            EventType.INPUT,
+            offset_ms=250,
+            target=email_target,
+            payload={"value": "bob@example.com", "is_trusted": True},
+        ),
+        # Pure modifier-only keydown -> dropped
+        _make_event(
+            3,
+            EventType.KEYDOWN,
+            offset_ms=400,
+            target=email_target,
+            payload={"key": "Control", "ctrl": True, "is_trusted": True},
+        ),
+        # Redacted FILL followed by CHANGE -> stays redacted
+        _make_event(
+            4,
+            EventType.INPUT,
+            offset_ms=600,
+            target=pw_target,
+            payload={"value": "[REDACTED]", "redacted": True, "is_trusted": True},
+        ),
+        _make_event(
+            5,
+            EventType.CHANGE,
+            offset_ms=700,
+            target=pw_target,
+            payload={"value": "should_not_leak", "is_trusted": True},
+        ),
+        # Click + spurious input + change on <select> -> collapsed into single SELECT
+        _make_event(
+            6, EventType.CLICK, offset_ms=1000, target=role_select, payload={"is_trusted": True}
+        ),
+        _make_event(
+            7,
+            EventType.INPUT,
+            offset_ms=1050,
+            target=role_select,
+            payload={"value": "admin", "is_trusted": True},
+        ),
+        _make_event(
+            8,
+            EventType.CHANGE,
+            offset_ms=1100,
+            target=role_select,
+            payload={"value": "admin", "selected_text": "Administrator", "is_trusted": True},
+        ),
+    ]
+
+    result = ProcessingEngine().process("sess-1", events)
+    actions = result.processed_events
+    assert [a.action_type for a in actions] == [
+        ProcessedActionType.FILL,
+        ProcessedActionType.FILL,
+        ProcessedActionType.SELECT,
+    ]
+    assert actions[0].raw_event_ids == ["ev-1", "ev-2"]
+    assert actions[0].payload["value"] == "bob@example.com"
+    assert actions[1].payload["value"] == "[REDACTED]"
+    assert actions[1].payload["redacted"] is True
+    assert actions[2].payload["value"] == "admin"
+    assert actions[2].raw_event_ids == ["ev-6", "ev-7", "ev-8"]
