@@ -108,6 +108,11 @@ def _safe_comment_text(text: str) -> str:
     return " ".join(text.splitlines()).strip()
 
 
+def _has_executable_statement(lines: Sequence[str]) -> bool:
+    """Return True if at least one line is a real Python statement (not blank or comment)."""
+    return any(line.strip() and not line.strip().startswith("#") for line in lines)
+
+
 def _needs_os_import(definitions: Sequence[TestDefinition]) -> bool:
     return any(
         a.action_type == ProcessedActionType.FILL and a.is_redacted and a.selector is not None
@@ -183,6 +188,7 @@ class PytestPlaywrightGenerator:
         doc_lines.append('    """')
         lines.extend(doc_lines)
 
+        body_start = len(lines)
         # Configure per-test timeout (always reset when sharing a context across tests)
         if definition.settings.timeout_ms != 30000 or shared_browser_context:
             lines.append(
@@ -218,7 +224,7 @@ class PytestPlaywrightGenerator:
         for assertion in definition.assertions:
             assertions_by_action.setdefault(assertion.after_action_id, []).append(assertion)
 
-        action_lines, active_page, emitted_body = self._render_action_sequence(
+        action_lines, active_page, _ = self._render_action_sequence(
             definition.actions,
             page_fixture,
             assertions_by_action=assertions_by_action,
@@ -229,7 +235,6 @@ class PytestPlaywrightGenerator:
         # Remaining detached / end-of-test assertions
         for leftover_group in assertions_by_action.values():
             for assertion in leftover_group:
-                emitted_body = True
                 lines.extend(
                     self._render_assertion(
                         assertion,
@@ -238,8 +243,9 @@ class PytestPlaywrightGenerator:
                     )
                 )
 
-        if not emitted_body:
-            lines.append("    # No recorded actions in this test definition.")
+        if not _has_executable_statement(lines[body_start:]):
+            if len(lines) == body_start:
+                lines.append("    # No recorded actions in this test definition.")
             lines.append("    pass")
 
         return "\n".join(lines)
@@ -434,6 +440,7 @@ class PytestPlaywrightGenerator:
                         auth_setup_def.actions
                         and auth_setup_def.actions[0].action_type == ProcessedActionType.NAVIGATE
                     )
+                    auth_body_start = len(lines)
                     for prereq in auth_setup_def.prerequisites:
                         if prereq.setup_url and not starts_with_nav:
                             lines.append(f"    page.goto({prereq.setup_url!r})")
@@ -442,6 +449,8 @@ class PytestPlaywrightGenerator:
                         "page",
                     )
                     lines.extend(auth_lines)
+                    if not _has_executable_statement(lines[auth_body_start:]):
+                        lines.append("    pass")
                 lines.extend(
                     [
                         "",

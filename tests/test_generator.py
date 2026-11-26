@@ -255,3 +255,60 @@ def test_generator_sanitizes_tricky_docstrings_and_quotes() -> None:
     code = PytestPlaywrightGenerator().render_test_module([defn])
     ast.parse(code)
     assert "import os" not in code
+
+
+def test_generator_emits_valid_python_for_comment_only_actions_and_auth_setup() -> None:
+    comment_only_auth = TestDefinition(
+        id="def-auth",
+        project_id="p1",
+        session_id="s1",
+        scenario_id="sc-1",
+        name="User Login",
+        function_name="test_user_login",
+        mode=TestMode.INDEPENDENT,
+        order_index=1,
+        actions=[
+            TestAction(
+                order_index=1,
+                action_type=ProcessedActionType.CLICK,
+                summary="Click missing selector",
+                selector=None,
+            ),
+            TestAction(
+                order_index=2,
+                action_type=ProcessedActionType.HOVER,
+                summary="Hover missing selector",
+                selector=None,
+            ),
+        ],
+    )
+    downstream = TestDefinition(
+        id="def-next",
+        project_id="p1",
+        session_id="s1",
+        scenario_id="sc-2",
+        name="Dashboard Action",
+        function_name="test_dashboard_action",
+        mode=TestMode.INDEPENDENT,
+        order_index=2,
+        prerequisites=[
+            TestPrerequisite(
+                name="authenticated_session",
+                description="Requires auth",
+                fixture_name="authenticated_page",
+            )
+        ],
+        actions=[
+            TestAction(
+                order_index=1,
+                action_type=ProcessedActionType.NAVIGATE,
+                summary="Empty navigate",
+                url="",
+            )
+        ],
+    )
+    suite = PytestPlaywrightGenerator().generate_suite([comment_only_auth, downstream])
+    ast.parse(suite.conftest.content)
+    for generated in suite.test_files:
+        ast.parse(generated.content)
+        assert "    pass" in generated.content
